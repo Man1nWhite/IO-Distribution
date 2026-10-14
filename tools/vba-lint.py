@@ -24,6 +24,8 @@ vba-lint.py — статическая проверка VBA-модуля (Module
   E15 ReDim X(1 To N) с явной нулевой/отрицательной границей (Runtime error 9)
   E16 строка кода внутри процедуры на нулевом отступе (потерянная индентация)
   E17 строка начинается с бинарного оператора, а предыдущая не продолжена «_»
+  E18 ссылка на несуществующую процедуру (вызов с аргументами или «Голый»
+      вызов строки) — ловит и случайно закомментированное определение
       (разорванное выражение — VBA: Compile error: Expected: expression)
 
 Предупреждения (код возврата не меняют):
@@ -478,6 +480,32 @@ def check_file(path):
         if code.count('"') % 2:
             err("E04", i, "нечётное число кавычек в физической строке "
                           "(литерал не может продолжаться через «_»): %s" % code.strip()[:60])
+
+    # E18 — имя в позиции «Имя(...)» обязано быть объявлено (переменная или
+    # массив → индексация) либо быть процедурой/встроенной функцией. Ловит в
+    # том числе случайно закомментированное или удалённое определение.
+    declared = set(mod_names) | proc_names
+    for p2 in procs:
+        declared |= declared_in_proc(p2)
+    for no, text, _ in logical:
+        m = re.match(
+            r"^(private|public\s+)?(dim|const|static|redim|type|enum)\s+"
+            r"(?:withevents\s+)?(%s)" % NAME_RE, text.strip(), re.I)
+        if m:
+            declared.add(m.group(3).lower())
+
+    for p2 in procs:
+        for no, text, _ in p2["body"]:
+            scan = mask_strings(text)
+            scan = re.sub(r"^\s*(public|private|friend)?\s*(sub|function)\s+\S+",
+                          "", scan, flags=re.I)
+            scan = re.sub(r"\.\s*%s" % NAME_RE, " ", scan)
+            for m in re.finditer(r"(?<![.\w])(%s)\s*\(" % NAME_RE, scan):
+                nm = m.group(1).lower()
+                if nm in declared or nm in known:
+                    continue
+                err("E18", no, "%s: «%s(...)» — имя не объявлено и такой "
+                               "процедуры нет" % (p2["name"], m.group(1)))
 
     # E17 — разорванная конкатенация/выражение
     cont_idx = set()

@@ -272,7 +272,8 @@ Public Sub —оздать онфигуратор()
     If IsNumeric(v) And Not IsEmpty(v) Then
         gRailLen = CDbl(v)
     Else
-        gRailLen = »звлечь„исло(v)
+        ' ƒвойной результат: дробна€ часть длины рейки сохран€етс€
+        gRailLen = „исло»з“екста(CStr(v))
     End If
 
     If gRailLen <= 0 Then
@@ -335,6 +336,13 @@ Public Sub —оздать онфигуратор()
     '---------------------------------------------------------------------
     defRows = Array(27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, _
                     47, 48, 49, 50, 51, 52, 53, 54, 55)
+
+    ' ќдин проход по строкам: не потер€лс€ ли смысл в столбце D.
+    For t = LBound(defRows) To UBound(defRows)
+        ѕроверитьячейку ол ws, CLng(defRows(t))
+    Next t
+
+    ѕроверитьячейку ол ws, 26
 
     defLensFallback = Array(35, 164, 164, 157, 157, 157, 157, _
                             110, 110, 100, 100, 23, 67, 13, 23, _
@@ -2833,17 +2841,57 @@ Private Function „итать ол( _
     ByVal ws As Worksheet, ByVal r As Long) As Long
 
     Dim v As Variant
+    Dim d As Double
 
     v = ws.Range(COL_QTY & r).Value2
 
     If IsError(v) Then Exit Function
+    If IsEmpty(v) Then Exit Function
 
+    ' Ќечисловой текст разбираетс€ „исло»з“екста (раньше был молчаливый 0);
+    ' сам факт разбора отмечает ѕроверитьячейку ол.
     If IsNumeric(v) Then
-        „итать ол = CLng(Int(CDbl(v)))
-
-        If „итать ол < 0 Then „итать ол = 0
+        d = Int(CDbl(v))
+    Else
+        d = Int(„исло»з“екста(CStr(v)))
     End If
+
+    If d < 0 Then d = 0
+    If d > 2147483647# Then d = 2147483647#
+
+    „итать ол = CLng(d)
 End Function
+
+' —толбец D об€зан содержать число. ≈сли там текст, количество берЄтс€ из
+' первой группы цифр Ч и об€зательно попадает в предупреждение, чтобы тиха€
+' подмена (или тихий пропуск строки) не осталась незаметной.
+Private Sub ѕроверитьячейку ол(ByVal ws As Worksheet, ByVal r As Long)
+    Dim v As Variant
+    Dim t As String
+    Dim q As Long
+
+    v = ws.Range(COL_QTY & r).Value2
+
+    If IsError(v) Then Exit Sub
+    If IsEmpty(v) Then Exit Sub
+    If IsNumeric(v) Then Exit Sub
+
+    t = Trim$(CStr(v))
+    If Len(t) = 0 Then Exit Sub
+
+    q = „итать ол(ws, r)
+
+    If q > 0 Then
+        gWarn = gWarn & vbCrLf & _
+            "  Х —трока " & r & ", столбец " & COL_QTY & _
+            ": количество записано текстом (""" & t & """); " & _
+            "прин€то " & q & "."
+    Else
+        gWarn = gWarn & vbCrLf & _
+            "  Х —трока " & r & ", столбец " & COL_QTY & _
+            ": """ & t & """ Ч не число; строка не участвует в расчЄте."
+    End If
+End Sub
 
 Private Function „итать„исло( _
     ByVal ws As Worksheet, ByVal addr As String) As Double
@@ -2857,7 +2905,7 @@ Private Function „итать„исло( _
     If IsNumeric(v) Then
         „итать„исло = CDbl(v)
     Else
-        „итать„исло = »звлечь„исло(v)
+        „итать„исло = „исло»з“екста(CStr(v))
     End If
 
     If „итать„исло < 0 Then „итать„исло = 0
@@ -2883,31 +2931,180 @@ Private Function ќчистить»м€( _
     End If
 End Function
 
-Private Function »звлечь„исло(ByVal v As Variant) As Long
-    Dim s As String
+'-----------------------------------------------------------------------------
+' „исло из текста. ѕравила (локаль не участвует: цифры накапливаютс€
+' арифметически, поэтому CDbl/CLng не спотыкаютс€ о разделитель):
+'   Х Ђ-ї/Ђ+ї в начале строки или после пробела Ч знак; дефис внутри
+'     наименовани€ (ЂLPA-340-100ї) знаком не считаетс€;
+'   Х одиночный пробел между цифрами Ч разделитель групп разр€дов, если
+'     дальше ровно 3 цифры (Ђ1 500ї, Ђ1 500 000ї; перва€ группа Ч 1Ц3);
+'   Х Ђ,ї и Ђ.ї Ч всегда дес€тичный разделитель (Ђ1,500ї = 1,5);
+'   Х текст после числа игнорируетс€ (Ђ2000 ммї = 2000, Ђ5 шт 160ї = 5);
+'   Х если цифр нет Ч 0.
+'-----------------------------------------------------------------------------
+Private Function „исло»з“екста(ByVal s As String) As Double
+    Dim n As Long
     Dim i As Long
-    Dim ch As String
-    Dim digits As String
+    Dim c As String
+    Dim d As Double
+    Dim scale As Double
+    Dim intDigits As Long
+    Dim groups As Long
+    Dim decSeen As Boolean
+    Dim neg As Boolean
+    Dim signOK As Boolean
+
+    s = Replace(s, ChrW$(160), " ")
+    s = Replace(s, ChrW$(8239), " ")
+    s = Replace(s, ChrW$(8201), " ")
+    s = Replace(s, ChrW$(8202), " ")
+    s = Replace(s, ChrW$(8722), "-")
+
+    n = Len(s)
+    If n = 0 Then Exit Function
+
+    ' Ќачало числа: перва€ цифра либо знак непосредственно перед цифрой.
+    i = 1
+
+    Do While i <= n
+        c = Mid$(s, i, 1)
+
+        If c >= "0" And c <= "9" Then
+            Exit Do
+        End If
+
+        If c = "-" Or c = "+" Then
+            If i = 1 Then
+                signOK = True
+            Else
+                signOK = (Mid$(s, i - 1, 1) = " ")
+            End If
+
+            If signOK And i < n Then
+                If Mid$(s, i + 1, 1) >= "0" Then
+                    If Mid$(s, i + 1, 1) <= "9" Then
+                        neg = (c = "-")
+                        i = i + 1
+                        Exit Do
+                    End If
+                End If
+            End If
+        End If
+
+        i = i + 1
+    Loop
+
+    If i > n Then Exit Function
+
+    ' ÷ела€ часть и группы разр€дов через пробел.
+    Do While i <= n
+        c = Mid$(s, i, 1)
+
+        If c >= "0" And c <= "9" Then
+            d = d * 10# + CDbl(AscW(c) - 48)
+            intDigits = intDigits + 1
+            i = i + 1
+
+        ElseIf c = " " Then
+            If Not ≈сть√руппа–азр€дов(s, i, n, intDigits, groups) Then
+                Exit Do
+            End If
+
+            i = i + 1
+            d = d * 1000#
+            d = d + CDbl(AscW(Mid$(s, i, 1)) - 48) * 100#
+            d = d + CDbl(AscW(Mid$(s, i + 1, 1)) - 48) * 10#
+            d = d + CDbl(AscW(Mid$(s, i + 2, 1)) - 48)
+            intDigits = 0
+            groups = groups + 1
+            i = i + 3
+
+        ElseIf c = "," Or c = "." Then
+            decSeen = True
+            i = i + 1
+            Exit Do
+
+        Else
+            Exit Do
+        End If
+    Loop
+
+    ' ƒробна€ часть.
+    If decSeen Then
+        scale = 10#
+
+        Do While i <= n
+            c = Mid$(s, i, 1)
+
+            If c < "0" Or c > "9" Then Exit Do
+
+            d = d + CDbl(AscW(c) - 48) / scale
+            scale = scale * 10#
+            i = i + 1
+        Loop
+    End If
+
+    If neg Then d = -d
+
+    „исло»з“екста = d
+End Function
+
+' ѕробел на позиции i раздел€ет группы разр€дов, если дальше идут ровно
+' 3 цифры, не продолженные цифрой (перва€ группа Ч 1Ц3 цифры, далее по 3).
+Private Function ≈сть√руппа–азр€дов( _
+    ByVal s As String, ByVal i As Long, ByVal n As Long, _
+    ByVal intDigits As Long, ByVal groups As Long) As Boolean
+
+    Dim d1 As String
+    Dim d2 As String
+    Dim d3 As String
+
+    If i + 3 > n Then Exit Function
+
+    d1 = Mid$(s, i + 1, 1)
+    d2 = Mid$(s, i + 2, 1)
+    d3 = Mid$(s, i + 3, 1)
+
+    If d1 < "0" Or d1 > "9" Then Exit Function
+    If d2 < "0" Or d2 > "9" Then Exit Function
+    If d3 < "0" Or d3 > "9" Then Exit Function
+
+    If i + 4 <= n Then
+        If Mid$(s, i + 4, 1) >= "0" Then
+            If Mid$(s, i + 4, 1) <= "9" Then Exit Function
+        End If
+    End If
+
+    If groups = 0 Then
+        ≈сть√руппа–азр€дов = (intDigits >= 1 And intDigits <= 3)
+    Else
+        ≈сть√руппа–азр€дов = True
+    End If
+End Function
+
+' ÷елочисленный доступ к разбору: дробна€ часть отбрасываетс€ (Fix), а не
+' округл€етс€, как это делал CLng; выход за диапазон Long ограничиваетс€.
+Private Function »звлечь„исло(ByVal v As Variant) As Long
+    Dim d As Double
 
     If IsError(v) Then Exit Function
     If IsEmpty(v) Then Exit Function
 
-    s = CStr(v)
-
-    For i = 1 To Len(s)
-        ch = Mid$(s, i, 1)
-
-        If ch >= "0" And ch <= "9" Then
-            digits = digits & ch
-
-        ElseIf Len(digits) > 0 Then
-            Exit For
-        End If
-    Next i
-
-    If Len(digits) > 0 Then
-        »звлечь„исло = CLng(digits)
+    If IsNumeric(v) Then
+        d = CDbl(v)
+    Else
+        d = „исло»з“екста(CStr(v))
     End If
+
+    d = Fix(d)
+
+    If d > 2147483647# Then
+        d = 2147483647#
+    ElseIf d < -2147483647# Then
+        d = -2147483647#
+    End If
+
+    »звлечь„исло = CLng(d)
 End Function
 
 '=============================================================================
