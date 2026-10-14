@@ -1,0 +1,25 @@
+name: VBA lint
+
+on:
+  push:
+    paths:
+      - '**/*.bas'
+      - '**/*.cls'
+      - 'tools/vba-lint.py'
+      - 'tools/parse-spec.py'
+      - '.github/workflows/vba-lint.yml'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Static check of VBA modules (Module1.bas)
+        run: python3 tools/vba-lint.py
+      - name: Number-from-text parsing spec (ЧислоИзТекста)
+        run: python3 tools/parse-spec.py
