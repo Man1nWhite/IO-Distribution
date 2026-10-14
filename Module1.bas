@@ -69,9 +69,8 @@ Private Const SVC_CAT_AO As String = "MODULE AO"
 ' ®мкость аналогового модул€, если его нет в Service.
 Private Const ANALOG_CH_DEFAULT As Long = 8
 
-' —троки листа "1" с барьерами дл€ AO (через зап€тую).
-' ѕусто Ч тип определ€етс€ по имени (AO / ¬џ’), иначе считаетс€ AI.
-
+' Ќаправление аналогового барьера задаЄтс€ номером строки листа "1":
+' строка 52 (см. ROWS_BAR_AI_AO) Ч общие AI/AO, остальные барьеры Ч входы AI.
 
 Private Const DIR_AI As Long = 1
 Private Const DIR_AI_AO As Long = 3
@@ -449,7 +448,7 @@ Public Sub —оздать онфигуратор()
                         wsS, rawNm, BAR_CH_DEFAULT, r, _
                         "аналоговый барьер")
 
-                    anDir = ЌаправлениејналогЅарьера(r, nm)
+                    anDir = ЌаправлениејналогЅарьера(r)
                 Else
                     ®мкостьјналогћодул€ wsS, rawNm, r, capAI, capAO
                 End If
@@ -477,7 +476,7 @@ Public Sub —оздать онфигуратор()
                 mCapAI(idx) = capAI
                 mCapAO(idx) = capAO
                 mAnDir(idx) = anDir
-                
+
                 If mLen(idx) > maxLen Then
                     maxLen = mLen(idx)
                 End If
@@ -656,11 +655,11 @@ Public Sub —оздать онфигуратор()
                     "DIO уже размещЄн до формировани€ группы."
             End If
 
-If mGrpType(idx) = TYP_DIO64 Then
-    relayLimit = RELAYS_PER_DIO64
-Else
-    relayLimit = RELAYS_PER_DIO32
-End If
+            If mGrpType(idx) = TYP_DIO64 Then
+                relayLimit = RELAYS_PER_DIO64
+            Else
+                relayLimit = RELAYS_PER_DIO32
+            End If
 
             nb = 0
             actualDI = 0
@@ -696,21 +695,21 @@ End If
                 End If
             Next b
 
-If actualDI + actualDO > relayLimit Then
-    Err.Raise vbObjectError + 23, , _
-        "ƒл€ " & mName(idx) & _
-        " назначено больше допустимого числа реле: " & _
-        (actualDI + actualDO) & " из " & relayLimit & "."
-End If
+            If actualDI + actualDO > relayLimit Then
+                Err.Raise vbObjectError + 23, , _
+                    "ƒл€ " & mName(idx) & _
+                    " назначено больше допустимого числа реле: " & _
+                    (actualDI + actualDO) & " из " & relayLimit & "."
+            End If
 
-If idx <> gLastDio Then
-    If actualDI + actualDO <> relayLimit Then
-        Err.Raise vbObjectError + 24, , _
-            "Ќепоследн€€ группа " & mName(idx) & _
-            " должна содержать " & relayLimit & _
-            " реле KDI/KDO суммарно."
-    End If
-End If
+            If idx <> gLastDio Then
+                If actualDI + actualDO <> relayLimit Then
+                    Err.Raise vbObjectError + 24, , _
+                        "Ќепоследн€€ группа " & mName(idx) & _
+                        " должна содержать " & relayLimit & _
+                        " реле KDI/KDO суммарно."
+                End If
+            End If
 
 
             ' ƒл€ ѕќ—Ћ≈ƒЌ≈√ќ DIO меньшие actualDI/actualDO допустимы.
@@ -1300,15 +1299,15 @@ Private Sub –азместить—в€зку(ByVal bid As Long)
     End If
 
     For c = 1 To cabCount
-    If ¬идЎкафа(c) = bKind(bid) Then
-        If bKind(bid) <> "M" Then
-            If –азместить—в€зку¬Ўкаф(bid, c) Then Exit Sub
+        If ¬идЎкафа(c) = bKind(bid) Then
+            If bKind(bid) <> "M" Then
+                If –азместить—в€зку¬Ўкаф(bid, c) Then Exit Sub
 
-        ElseIf Not Ўкаф— онтроллером»лиDIO(c) Then
-            If –азместить—в€зку¬Ўкаф(bid, c) Then Exit Sub
+            ElseIf Not Ўкаф— онтроллером»лиDIO(c) Then
+                If –азместить—в€зку¬Ўкаф(bid, c) Then Exit Sub
+            End If
         End If
-    End If
-Next c
+    Next c
     ƒобавитьЎкаф bKind(bid)
 
     If –азместить—в€зку¬Ўкаф(bid, cabCount) Then Exit Sub
@@ -1825,6 +1824,9 @@ Private Sub ѕроверить–азмещение()
     Dim b As Long
     Dim owner As Long
     Dim cabId As Long
+    Dim sumLen() As Double
+    Dim cntRail() As Long
+    Dim tol As Double
 
     For i = 1 To gTotalMods
         If Not mPlaced(i) Then
@@ -1857,11 +1859,11 @@ Private Sub ѕроверить–азмещение()
 
         cabId = bCab(b)
         If bCtrlCab(b) = 0 And bDioOwner(b) = 0 And bKind(b) = "M" Then
-    If Ўкаф— онтроллером»лиDIO(cabId) Then
-        Err.Raise vbObjectError + 76, , _
-            "–еле без назначени€ попало в шкаф с P410 или DIO."
-    End If
-End If
+            If Ўкаф— онтроллером»лиDIO(cabId) Then
+                Err.Raise vbObjectError + 76, , _
+                    "–еле без назначени€ попало в шкаф с P410 или DIO."
+            End If
+        End If
 
         For i = 1 To gTotalMods
             If mBundle(i) = b Then
@@ -1898,6 +1900,42 @@ End If
             End If
         End If
     Next b
+
+    '---------------------------------------------------------------------
+    ' »нвариант рейки: суммарна€ ширина размещЄнных элементов не может
+    ' превышать полезную длину рейки. —умма считаетс€ независимо Ч по
+    ' элементам, а не по накопленному учЄту, поэтому проверка ловит и
+    ' расхождение учЄта (rUsed против суммы ширин).
+    ' ƒопуск: PLAN_EPS на каждый элемент Ч PlaceModule допускает такое
+    ' превышение Ємкости при установке последнего элемента на рейке.
+    '---------------------------------------------------------------------
+    If railCount >= 1 Then
+        ReDim sumLen(1 To railCount)
+        ReDim cntRail(1 To railCount)
+
+        For i = 1 To gTotalMods
+            sumLen(mRail(i)) = sumLen(mRail(i)) + mLen(i)
+            cntRail(mRail(i)) = cntRail(mRail(i)) + 1
+        Next i
+
+        For i = 1 To railCount
+            tol = PLAN_EPS * (cntRail(i) + 1)
+
+            If sumLen(i) > rCap(i) + tol Then
+                Err.Raise vbObjectError + 77, , _
+                    "–ейка " & i & " шкафа " & rCab(i) & _
+                    " переполнена: " & Format(sumLen(i), "0") & _
+                    " мм при Ємкости " & Format(rCap(i), "0") & " мм."
+            End If
+
+            If Abs(sumLen(i) - rUsed(i)) > tol Then
+                Err.Raise vbObjectError + 78, , _
+                    "”чЄт зан€тости рейки " & i & " разошЄлс€ с суммой " & _
+                    "ширины элементов: " & Format(rUsed(i), "0") & _
+                    " мм против " & Format(sumLen(i), "0") & " мм."
+            End If
+        Next i
+    End If
 End Sub
 
 Private Sub –азместитьќдиночный(ByVal idx As Long)
@@ -2438,8 +2476,9 @@ Private Sub ®мкостьјналогћодул€( _
     End If
 End Sub
 
+' Ќаправление определ€етс€ только номером строки (им€ не используетс€).
 Private Function ЌаправлениејналогЅарьера( _
-    ByVal r As Long, ByVal nm As String) As Long
+    ByVal r As Long) As Long
 
     If ¬—писке(r, ROWS_BAR_AI_AO) Then
         ЌаправлениејналогЅарьера = DIR_AI_AO
@@ -2916,6 +2955,18 @@ Private Sub Ќарисовать–асположение( _
     Dim txtCol As Long
     Dim rb As Shape
     Dim msh As Shape
+
+    ' ћасштаб отрисовки об€зан быть согласован с высотой верхней зоны:
+    ' CTRL_ZONE_MM мм при MM px/мм дают ровно CTRL_OFFSET_PX пикселей.
+    ' ≈сли равенство нарушено правкой констант, полоса Ђрезервї и
+    ' стартова€ позици€ модулей разойдутс€ Ч провер€ем €вно.
+    If Abs(CTRL_OFFSET_PX - CTRL_ZONE_MM * MM) > 0.001 Then
+        Err.Raise vbObjectError + 82, , _
+            "—лужебна€ ошибка: масштаб отрисовки не согласован " & _
+            "(CTRL_ZONE_MM = " & CTRL_ZONE_MM & " мм, MM = " & MM & _
+            ", CTRL_OFFSET_PX = " & CTRL_OFFSET_PX & " px)."
+    End If
+
 
     If cabCount < 1 Or railCount < 1 Then
         Err.Raise vbObjectError + 90, , _
