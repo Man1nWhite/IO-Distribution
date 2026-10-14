@@ -45,8 +45,6 @@ Private Const FAM_AI_BAR As String = "51,52"
 Private Const FAM_DIO_REL As String = "34,35,36,37"
 Private Const FAM_DIO_BAR As String = "53,54,55"
 
-Private Const ROWS_BAR_KDI As String = "53,54,55"
-Private Const ROWS_BAR_KDO As String = "53"
 
 Private Const ROWS_SEPARATE As String = _
     "34,35,36,37,47,48,49,50,51,52,53,54,55"
@@ -76,7 +74,6 @@ Private Const ANALOG_CH_DEFAULT As Long = 8
 
 
 Private Const DIR_AI As Long = 1
-Private Const DIR_AO As Long = 2
 Private Const DIR_AI_AO As Long = 3
 
 ' Единственная строка общих барьеров AI/AO на листе "1".
@@ -94,7 +91,6 @@ Private Const SWITCH_RAILS As Long = 1
 
 Private Const COL_NAME As String = "C"
 Private Const COL_QTY As String = "D"
-Private Const SH_MOD_HDR_ROW As Long = 9
 
 Private Const CTRL_ZONE_MM As Double = 224
 Private Const CTRL_BLOCK_PX As Double = 52
@@ -147,7 +143,7 @@ Private mBundle() As Long
 Private mAnalogOwner() As Long
 Private mCapAI() As Long      ' каналы AI модуля
 Private mCapAO() As Long      ' каналы AO модуля
-Private mAnDir() As Long      ' DIR_AI / DIR_AO для аналогового барьера
+Private mAnDir() As Long      ' DIR_AI / DIR_AI_AO для аналогового барьера
 Private gTotalMods As Long
 
 ' Связки «реле + его барьеры».
@@ -158,28 +154,6 @@ Private bCab() As Long
 Private bDioOwner() As Long
 Private bCtrlCab() As Long
 Private gBundleCount As Long
-
-Private Function ЭтоНоль(ByVal v As Variant) As Boolean
-    If IsError(v) Then Exit Function
-    If IsEmpty(v) Then Exit Function
-
-    If IsNumeric(v) Then
-        ЭтоНоль = (CDbl(v) = 0)
-    Else
-        ЭтоНоль = (Trim$(CStr(v)) = "0")
-    End If
-End Function
-
-Private Function ЭтоНольИлиПрочерк(ByVal v As Variant) As Boolean
-    If IsError(v) Then Exit Function
-    If IsEmpty(v) Then Exit Function
-
-    If Trim$(CStr(v)) = "-" Then
-        ЭтоНольИлиПрочерк = True
-    Else
-        ЭтоНольИлиПрочерк = ЭтоНоль(v)
-    End If
-End Function
 
 '=============================================================================
 ' ГЛАВНАЯ ПРОЦЕДУРА
@@ -258,10 +232,6 @@ Public Sub СоздатьКонфигуратор()
     Dim actualDI As Long
     Dim actualDO As Long
 
-    Dim modCnt As Long
-    Dim barCnt As Long
-    Dim iMod As Long
-    Dim takeBar As Long
     Dim items() As Long
     Dim n As Long
 
@@ -2014,68 +1984,6 @@ Private Sub ДобавитьВСписокБлк( _
     blocks(n) = blk
 End Sub
 
-Private Function ВзятьБарьеры( _
-    ByVal fam As Long, ByVal reqCount As Long, _
-    ByVal ownerIdx As Long, _
-    ByRef items() As Long, ByRef n As Long) As Long
-
-    Dim i As Long
-    Dim got As Long
-
-    If reqCount <= 0 Then Exit Function
-
-    For i = 1 To gTotalMods
-        If got >= reqCount Then Exit For
-
-        If Not mPlaced(i) And Not mSep(i) And _
-           mBundle(i) = 0 And mAnalogOwner(i) = 0 Then
-
-            If mFam(i) = fam And mIsBar(i) Then
-                mAnalogOwner(i) = ownerIdx
-                ДобавитьВСписок i, items, n
-                got = got + 1
-            End If
-        End If
-    Next i
-
-    If got <> reqCount Then
-        Err.Raise vbObjectError + 74, , _
-            "Не удалось назначить все аналоговые барьеры " & _
-            "модулю """ & mName(ownerIdx) & """."
-    End If
-
-    ВзятьБарьеры = got
-End Function
-
-Private Function Доля( _
-    ByVal total As Long, ByVal parts As Long, _
-    ByVal i As Long) As Long
-
-    If parts <= 0 Or total <= 0 Then Exit Function
-
-    Доля = total \ parts
-
-    If i <= total Mod parts Then
-        Доля = Доля + 1
-    End If
-End Function
-
-Private Function КолВСемействе( _
-    ByVal fam As Long, ByVal barriers As Boolean) As Long
-
-    Dim i As Long
-
-    For i = 1 To gTotalMods
-        If Not mPlaced(i) And Not mSep(i) Then
-            If mFam(i) = fam And _
-               mIsBar(i) = barriers Then
-
-                КолВСемействе = КолВСемействе + 1
-            End If
-        End If
-    Next i
-End Function
-
 Private Function ЕстьВСемействе( _
     ByVal fam As Long, ByVal barriers As Boolean) As Boolean
 
@@ -2323,19 +2231,6 @@ Private Function ЭтоБарьер(ByVal r As Long) As Boolean
                 ВСписке(r, FAM_TC_BAR) Or _
                 ВСписке(r, FAM_AI_BAR) Or _
                 ВСписке(r, FAM_DIO_BAR)
-End Function
-
-Private Function ИмяСемейства(ByVal fam As Long) As String
-    Select Case fam
-        Case FAM_TC
-            ИмяСемейства = "TC/RTD"
-
-        Case FAM_AI
-            ИмяСемейства = "AI/AO"
-
-        Case FAM_DIO
-            ИмяСемейства = "DIO"
-    End Select
 End Function
 
 Private Function ОпределитьТип( _
@@ -2598,8 +2493,6 @@ Private Sub РаспределитьАналоговыеБарьеры( _
         groupName = "AI/AO"
     ElseIf fam = FAM_TC Then
         groupName = "TC/RTD"
-    ElseIf dirType = DIR_AO Then
-        groupName = "AO"
     Else
         groupName = "AI, включая RTD>AI"
     End If
@@ -2641,11 +2534,7 @@ Private Sub РаспределитьАналоговыеБарьеры( _
 
                 ElseIf mFam(i) = fam Then
 
-                    If dirType = DIR_AO Then
-                        curCap = mCapAO(i)
-                    Else
-                        curCap = mCapAI(i)
-                    End If
+                    curCap = mCapAI(i)
                 End If
 
                 ' Модули без подходящих каналов не включаем.
