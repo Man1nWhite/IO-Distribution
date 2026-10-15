@@ -37,6 +37,13 @@ def main():
     missing = [n for n in named if n not in code]
     for n in named:
         print(("ok   " if n in code else "FAIL ") + n)
+    # Обратная сторона не проверяется (служебные процедуры вне карты
+    # допустимы), но список печатается: так видно, что именно не описано,
+    # и расхождение после переименования не прячется в «служебные».
+    outside = sorted(code - set(named))
+    print(f"\nвне карты (служебные, допустимо): {len(outside)}")
+    for n in outside:
+        print("     " + n)
     print(f"\nкарта README: {len(named)} имён, "
           f"отсутствует в коде: {len(missing)}")
     return 1 if missing else 0

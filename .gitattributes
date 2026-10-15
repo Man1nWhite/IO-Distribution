@@ -1,0 +1,15 @@
+# Module1.bas живёт в Windows-1251 + CRLF (E01/E02 линтера), и импортируется в
+# VBE как есть. `-text` запрещает git любую нормализацию окончаний строк: без
+# этого атрибута `core.autocrlf=true` (умолчание Git for Windows) при первом же
+# коммите сложил бы в blob LF вместо CRLF — локально всё зелено, CI красный.
+*.bas -text
+
+# Книги Excel — бинарники, никаких сравнений построчно.
+*.xlsx binary
+*.xlsm binary
+
+# Текст репозитория — LF (как и было до этого файла).
+*.py  text eol=lf
+*.md  text eol=lf
+*.sh  text eol=lf
+*.yml text eol=lf

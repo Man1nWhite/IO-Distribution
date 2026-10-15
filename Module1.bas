@@ -80,6 +80,9 @@ Private Const PLAN_EPS As Double = 0.0001
 Private Const PLAN_NODE_LIMIT As Long = 300000
 Private Const PLAN_SEARCH_BLOCK_LIMIT As Long = 120
 
+' Предел Long: большее значение CLng не переживёт (ошибка 6, Overflow).
+Private Const MAX_LONG As Double = 2147483647#
+
 ' Рейки и шкафы.
 Private rCab() As Long
 Private rKind() As String
@@ -2965,7 +2968,7 @@ Private Function КаналыИзService( _
                         If IsNumeric(v) Then
                             d = CDbl(v)
 
-                            If d > 0 And d <= 2147483647# Then
+                            If d > 0 And d <= MAX_LONG Then
                                 If d = Fix(d) Then
                                     КаналыИзService = CLng(d)
                                     Exit Function
@@ -3007,7 +3010,7 @@ Private Function ЧитатьКол( _
     End If
 
     If d < 0 Then d = 0
-    If d > 2147483647# Then d = 2147483647#
+    If d > MAX_LONG Then d = MAX_LONG
 
     ЧитатьКол = CLng(d)
 End Function
@@ -3251,10 +3254,10 @@ Private Function ИзвлечьЧисло(ByVal v As Variant) As Long
 
     d = Fix(d)
 
-    If d > 2147483647# Then
-        d = 2147483647#
-    ElseIf d < -2147483647# Then
-        d = -2147483647#
+    If d > MAX_LONG Then
+        d = MAX_LONG
+    ElseIf d < -MAX_LONG Then
+        d = -MAX_LONG
     End If
 
     ИзвлечьЧисло = CLng(d)
