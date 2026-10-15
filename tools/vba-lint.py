@@ -70,7 +70,7 @@ BUILTINS = set("""
 abs access application array atn cbool cbyte ccur cdate cdbl cdec cint clng
 clnglng clngptr cmdialog cobj cos csng cstr cvar date dateserial dateadd
 datediff datepart datevalue day debug dir division exp fix format hex int
-isempty iserror isnull isnumeric isarray isobject isdate ismissing lcase left
+isempty iserror isnull isnumeric isarray isobject isdate ismissing vartype lcase left
 len lbound lcase loc lof ltrim mid minute month monthname now oct right rnd
 round sgn second split sqr str strconv tan time timer timeserial
 timevalue trim typename ucase ubound val variant weekday weekyear year
@@ -90,7 +90,7 @@ CONSTANTS = set("""
 vbnullstring vbcr vblf vbcrlf vbobjecterror vbcritical vbexclamation
 vbinformation vbyes vbno vbok vbokcancel vbyesno vbretry vbcancel vbquestion
 vbblue vbgreen vbred vbblack vbyellow vbwhite vbmagenta vbcyan vbtabs vbtab
-vbformfeed vbnewline vbtrue vbfalse vbtextcompare vbbinary vbunicode
+vbformfeed vbnewline vbtrue vbfalse vbboolean vbtextcompare vbbinary vbunicode
 vbdirectory vbsystem vbsystemfile vbnormal vbmaximized vbminimized vbhide
 vbshow vbfirstrow vbfirstcol vbgeneral vbext_ct_stdmodule
 msoshaperectangle msoshapetextbox msotextorientationhorizontal msoalignleft

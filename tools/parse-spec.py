@@ -16,7 +16,8 @@
 Ветку `IsNumeric` → `CDbl`, которой потребители VBA опережают разбор, зеркало
 не покрывает — она зависит от системной локали (`izvlech_chislo` приближает её
 через `float()`: в en-US `IsNumeric("1,234")` = True, а `float("1,234")` —
-ValueError).
+ValueError). Булевы значения (`TRUE`/`FALSE` в ячейке) обе стороны трактуют
+как 0 — в VBA `ИзвлечьЧисло` отсекает их до `IsNumeric`.
 
 Код возврата: 0 — все векторы совпали, 1 — есть расхождение.
 """
@@ -110,7 +111,8 @@ def chislo_iz_teksta(s):
 
 def izvlech_chislo(v):
     """Зеркало Function ИзвлечьЧисло(ByVal v As Variant) As Long."""
-    if v is None or v is True:
+    # Empty/ошибка и булево — 0 (в VBA булево отсекается vbBoolean до IsNumeric).
+    if v is None or isinstance(v, bool):
         return 0
     try:
         d = float(v)

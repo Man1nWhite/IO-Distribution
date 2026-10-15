@@ -367,9 +367,8 @@ def scenario_p410_bundles():
               place_bundle_on_free_rail(rails, lens, placed, 1, "M", items))
         groups.append((items, 1))
     counts = [len(rails.elems[i]) // 5 for i in range(len(rails))]
-    # Открытый инженерный вопрос: фронтальные рейки урезаны на 224 мм,
-    # поэтому при равных связках задние рейки (полные 2000 мм) заполняются
-    # плотнее фронтальных. Фиксируем текущее поведение: [F, F, B, B].
+    # Фронтальные рейки урезаны на 224 мм, поэтому при равных связках задние
+    # (полные 2000 мм) заполняются плотнее фронтальных: [F, F, B, B].
     check("P410: все связки целы, раскладка F/F/B/B = 1/1/3/3",
           counts == [1, 1, 3, 3], str(counts))
     probs = check_invariants("P410", rails, lens, placed, groups)

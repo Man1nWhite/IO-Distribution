@@ -3141,6 +3141,7 @@ Private Sub «аписать„ислоЎкафов(ByVal ws As Worksheet, ByVal n As Long)
     If UCase$(Trim$(CStr(lbl))) <> UCase$(CAB_LABEL) Then Exit Sub
 
     On Error Resume Next
+    Err.Clear
     ws.Range(ADDR_CAB_COUNT).Value2 = n
     errText = Err.Description
     On Error GoTo 0
@@ -3350,6 +3351,9 @@ Private Function »звлечь„исло(ByVal v As Variant) As Long
 
     If IsError(v) Then Exit Function
     If IsEmpty(v) Then Exit Function
+
+    ' Ѕулево в €чейке Ч не число: иначе IsNumeric даЄт CDbl(TRUE) = -1.
+    If VarType(v) = vbBoolean Then Exit Function
 
     If IsNumeric(v) Then
         d = CDbl(v)

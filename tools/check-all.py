@@ -5,6 +5,7 @@
 Запуск из корня или из любого каталога, на любой ОС:
 
     python3 tools/check-all.py          (Windows: py tools\\check-all.py)
+    python3 tools/check-all.py --quiet  компактно: строка на шаг вместо тела вывода
     python3 tools/check-all.py --list   только перечислить шаги
 
 Шаги — STEPS ниже. Их совпадение с шагами CI (.github/workflows/vba-lint.yml,
@@ -38,6 +39,9 @@ STEPS = [
 
 def main(argv):
     args = argv[1:]
+    quiet = "--quiet" in args
+    if quiet:
+        args = [a for a in args if a != "--quiet"]
     if args == ["--list"]:
         # Формат как в `run:` шагов CI — его сверяет check-sync.py.
         for script, _title in STEPS:
@@ -49,11 +53,28 @@ def main(argv):
 
     total = len(STEPS)
     for n, (script, title) in enumerate(STEPS, 1):
+        if quiet:
+            # Компактно: строка на шаг (итог — последняя строка шага);
+            # тело вывода — только упавшего шага. Байты дочернего вывода —
+            # UTF-8: инструменты сами переключают кодировку.
+            proc = subprocess.run([sys.executable, str(ROOT / script)],
+                                  cwd=str(ROOT), capture_output=True)
+            out = (proc.stdout + proc.stderr).decode("utf-8", errors="replace")
+            if proc.returncode != 0:
+                print("FAIL %s:\n%s" % (title, out))
+                print("FAIL %s: код %d — остальные шаги не запускались"
+                      % (script, proc.returncode))
+                return proc.returncode
+            tail = [ln for ln in out.splitlines() if ln.strip()]
+            print("ok   %s%s" % (title, " — " + tail[-1] if tail else ""),
+                  flush=True)
+            continue
         if n > 1:
             print()
         # flush: заголовок должен попасть в pipe раньше вывода дочернего шага.
         print("== %d/%d %s ==" % (n, total, title), flush=True)
-        rc = subprocess.call([sys.executable, str(ROOT / script)], cwd=str(ROOT))
+        rc = subprocess.run([sys.executable, str(ROOT / script)],
+                            cwd=str(ROOT)).returncode
         if rc != 0:
             print("\nFAIL %s: код %d — остальные шаги не запускались" % (script, rc))
             return rc
