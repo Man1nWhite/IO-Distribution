@@ -8,6 +8,7 @@ on:
       - 'tools/**'
       - 'README.md'
       - '**/*.xlsx'
+      - '**/*.xlsm'
       - '.gitattributes'
       - '.github/workflows/vba-lint.yml'
   pull_request:
@@ -36,7 +37,7 @@ jobs:
         run: python3 tools/plan-spec.py
       - name: README procedure map vs code
         run: python3 tools/check-readme-map.py
-      - name: Example.xlsx vs README and Service
+      - name: Example.xlsm vs README and Service
         run: python3 tools/check-example.py
       - name: Mirrors, constants and README claims vs code
         run: python3 tools/check-sync.py
