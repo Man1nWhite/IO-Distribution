@@ -297,6 +297,17 @@ Public Sub —оздать онфигуратор()
     gCtrlPerBlock = 1
     If ƒа(ws.Range("D12").Value2) Then gCtrlPerBlock = 2
 
+    ' ѕри резервировании контроллеры идут парами: нечЄтное D26 оставл€ет
+    ' последний шкаф с одним P410.
+    If gCtrlPerBlock = 2 And ctrlCount > 0 And _
+       (ctrlCount Mod 2) <> 0 Then
+
+        gWarn = gWarn & vbCrLf & _
+            "  Х ¬ D12 выбрано резервирование контроллеров (YES), " & _
+            "но в D26 указано нечЄтное количество P410 (" & _
+            ctrlCount & "); один шкаф будет с 1 контроллером."
+    End If
+
     capFull = gRailLen * (1 - gFreeFrac)
     capCtrl = capFull - CTRL_ZONE_MM
 
@@ -973,25 +984,41 @@ Private Sub «акрепить–еле«а онтроллером( _
     ByVal want As Long, ByRef gotCnt As Long)
 
     Dim b As Long
+    Dim pass As Long
+    Dim placedOk As Boolean
 
     gotCnt = 0
     If want <= 0 Then Exit Sub
 
-    For b = 1 To gBundleCount
-        If gotCnt >= want Then Exit For
+    ' ѕроход 1 Ч св€зка целиком на наименее загруженную рейку шкафа: до
+    ' 4 KDI и 4 KDO расход€тс€ по разным рейкам шкафа P410, а не набиваютс€
+    ' на первую. ѕроход 2 Ч штатна€ укладка остатка (св€зку допустимо
+    ' разложить по нескольким рейкам того же шкафа).
+    For pass = 1 To 2
+        For b = 1 To gBundleCount
+            If gotCnt >= want Then Exit For
 
-        If Not bPlaced(b) And _
-           bDioOwner(b) = 0 And _
-           bCtrlCab(b) = 0 And _
-           bKind(b) = "M" And _
-           “ип—в€зки(b) = relType Then
+            If Not bPlaced(b) And _
+               bDioOwner(b) = 0 And _
+               bCtrlCab(b) = 0 And _
+               bKind(b) = "M" And _
+               “ип—в€зки(b) = relType Then
 
-            If –азместить—в€зку¬Ўкаф(b, cabId) Then
-                bCtrlCab(b) = cabId
-                gotCnt = gotCnt + 1
+                If pass = 1 Then
+                    placedOk = –азместить—в€зкуЌа—вободной–ейке(b, cabId)
+                Else
+                    placedOk = –азместить—в€зку¬Ўкаф(b, cabId)
+                End If
+
+                If placedOk Then
+                    bCtrlCab(b) = cabId
+                    gotCnt = gotCnt + 1
+                End If
             End If
-        End If
-    Next b
+        Next b
+
+        If gotCnt >= want Then Exit For
+    Next pass
 End Sub
 
 '=============================================================================
@@ -1185,6 +1212,54 @@ End Function
 '=============================================================================
 ' –ј«ћ≈ў≈Ќ»≈ Ќ≈ƒ≈Ћ»ћџ’ √–”ѕѕ
 '=============================================================================
+
+' —в€зка [реле + его барьеры] целиком на наименее загруженную рейку шкафа
+' (максимум свободного места). ≈сли на одну рейку св€зка не встаЄт Ч False,
+' состо€ние не мен€етс€: решение остаЄтс€ за –азместить—в€зку¬Ўкаф.
+Private Function –азместить—в€зкуЌа—вободной–ейке( _
+    ByVal bid As Long, ByVal cabId As Long) As Boolean
+
+    Dim items() As Long
+    Dim n As Long
+    Dim i As Long
+    Dim j As Long
+    Dim best As Long
+    Dim freeLen As Double
+    Dim bestFree As Double
+    Dim totalLen As Double
+
+    If bPlaced(bid) Then Exit Function
+    If bDioOwner(bid) <> 0 Then Exit Function
+    If ¬идЎкафа(cabId) <> bKind(bid) Then Exit Function
+
+    ReDim items(1 To 16)
+    —обрать—в€зку bid, items, n
+
+    totalLen = —уммаƒлин(items, n)
+
+    For i = 1 To railCount
+        If rCab(i) = cabId And rKind(i) = bKind(bid) Then
+            freeLen = rCap(i) - rUsed(i)
+
+            If freeLen + PLAN_EPS >= totalLen And _
+               freeLen > bestFree Then
+
+                best = i
+                bestFree = freeLen
+            End If
+        End If
+    Next i
+
+    If best = 0 Then Exit Function
+
+    For j = 1 To n
+        PlaceModule items(j), best
+    Next j
+
+    bPlaced(bid) = True
+    bCab(bid) = cabId
+    –азместить—в€зкуЌа—вободной–ейке = True
+End Function
 
 Private Function –азместить—в€зку¬Ўкаф( _
     ByVal bid As Long, ByVal cabId As Long) As Boolean
@@ -1422,8 +1497,15 @@ Private Function TryPlaceGroupInCab( _
     ByRef hitLimit As Boolean) As Boolean
 
     Dim plan() As Long
+    Dim partBlocks() As Long
     Dim singleBlocks() As Long
+    Dim blkLen() As Double
     Dim localLimit As Boolean
+    Dim partCount As Long
+    Dim cnt As Long
+    Dim wide As Long
+    Dim bestLen As Double
+    Dim b As Long
     Dim j As Long
 
     railsUsed = 0
@@ -1442,6 +1524,70 @@ Private Function TryPlaceGroupInCab( _
     If localLimit Then hitLimit = True
 
     If nBlk < n Then
+        ' „астичное дробление: по одному дробитс€ самый широкий составной
+        ' блок, остальные св€зки [реле + его барьеры] остаютс€ целыми.
+        ReDim partBlocks(1 To n)
+        partCount = nBlk
+
+        For j = 1 To n
+            partBlocks(j) = blocks(j)
+        Next j
+
+        Do While partCount < n
+            ReDim blkLen(1 To partCount)
+            wide = 0
+            bestLen = 0
+
+            For b = 1 To partCount
+                cnt = 0
+
+                For j = 1 To n
+                    If partBlocks(j) = b Then
+                        cnt = cnt + 1
+                        blkLen(b) = blkLen(b) + mLen(items(j))
+                    End If
+                Next j
+
+                If cnt > 1 And blkLen(b) > bestLen Then
+                    wide = b
+                    bestLen = blkLen(b)
+                End If
+            Next b
+
+            If wide = 0 Then Exit Do
+
+            cnt = 0
+
+            For j = 1 To n
+                If partBlocks(j) = wide Then
+                    cnt = cnt + 1
+
+                    If cnt > 1 Then
+                        partCount = partCount + 1
+                        partBlocks(j) = partCount
+                    End If
+                End If
+            Next j
+
+            ' ¬се блоки стали одиночными Ч это штатный фоллбэк ниже.
+            If partCount >= n Then Exit Do
+
+            If TryPlanBlocks( _
+                cabId, kind, items, partBlocks, n, partCount, _
+                plan, localLimit) Then
+
+                CommitPlan items, partBlocks, n, plan, railsUsed
+                wasSplit = True
+                TryPlaceGroupInCab = True
+                Exit Function
+            End If
+
+            If localLimit Then
+                hitLimit = True
+                Exit Do
+            End If
+        Loop
+
         ReDim singleBlocks(1 To n)
 
         For j = 1 To n
@@ -1665,6 +1811,8 @@ Private Function SearchBlocks( _
     Dim duplicate As Boolean
 
     Dim blk As Long
+    Dim prevBlk As Long
+    Dim startRail As Long
     Dim i As Long
     Dim j As Long
 
@@ -1685,7 +1833,25 @@ Private Function SearchBlocks( _
     blk = ord(level)
     ReDim seenFree(1 To nRails)
 
-    For i = 1 To nRails
+    ' ord отсортирован по невозрастанию длины: соседние блоки одинаковой
+    ' длины взаимозамен€емы, поэтому такой блок пробуем начина€ с рейки
+    ' предыдущего Ч перестановки одинаковых блоков не перебираютс€.
+    startRail = 1
+
+    If level > 1 Then
+        prevBlk = ord(level - 1)
+
+        If Abs(blkLen(blk) - blkLen(prevBlk)) <= PLAN_EPS Then
+            For i = 1 To nRails
+                If railIds(i) = plan(prevBlk) Then
+                    startRail = i
+                    Exit For
+                End If
+            Next i
+        End If
+    End If
+
+    For i = startRail To nRails
         If freeCap(i) + PLAN_EPS >= blkLen(blk) Then
             duplicate = False
 
@@ -2437,6 +2603,8 @@ Private Sub –аспределитьјналоговыеЅарьеры( _
     Dim k As Long
     Dim tmp As Long
     Dim curCap As Long
+    Dim oldCh As Long
+    Dim capIn As Long
     Dim ch As Long
     Dim best As Long
 
@@ -2527,6 +2695,8 @@ Private Sub –аспределитьјналоговыеЅарьеры( _
     ' уже зан€та RTD>AI, а температурные барьеры выходы AO температурного
     ' модул€ не занимают.
     For k = 1 To nMod
+        oldCh = 0
+
         For i = 1 To gTotalMods
 
             If mAnalogOwner(i) = mods(k) Then
@@ -2539,12 +2709,23 @@ Private Sub –аспределитьјналоговыеЅарьеры( _
                 End If
 
                 If countOld Then
-                    usedA(k) = usedA(k) + mCh(i)
+                    oldCh = oldCh + mCh(i)
                     cntA(k) = cntA(k) + 1
-                    totalNeed = totalNeed + mCh(i)
                 End If
             End If
         Next i
+
+        ' Ѕарьеры RTD>AI (строка 51) подключаютс€ только ко входам AI:
+        ' в общем пуле AI/AO они занимают не больше mCapAI, выходы AO
+        ' остаютс€ барьерам строки 52. ѕревышение, о котором уже
+        ' предупредил проход строки 51, в overflow не дублируетс€.
+        If dirType = DIR_AI_AO Then
+            capIn = mCapAI(mods(k))
+            If oldCh > capIn Then oldCh = capIn
+        End If
+
+        usedA(k) = usedA(k) + oldCh
+        totalNeed = totalNeed + oldCh
     Next k
 
     For i = 2 To nBar
