@@ -12,9 +12,10 @@
      (tools/plan-spec.py) и `MAX_LONG` (tools/parse-spec.py);
   2. `defRows` (Module1.bas) ↔ набор строк из таблицы «Строки» в README;
   3. `defLensFallback` (Module1.bas) ↔ строка «Запасные ширины» в README;
-  4. команды раздела «Проверки» README ↔ шаги CI, и шаги CI ↔
+  4. команды раздела «Проверки» README ↔ шаги джоба lint в CI, и они же ↔
      `tools/check-all.py --list` (тот же порядок): новый инструмент обязан
-     попасть во все три места, иначе он тихо не работает;
+     попасть во все три места, иначе он тихо не работает; джоб windows
+     запускает `python tools/check-all.py`;
   5. счётчики, обещанные README («N тестовых вектора», «все N имён»), ↔
      фактические результаты parse-spec.py и check-readme-map.py;
   6. вывод каждого `tools/*.py` переживает pipe в cp1252 — так Python пишет
@@ -205,9 +206,29 @@ def readme_commands():
     return [line.strip() for line in m.group(1).splitlines() if line.strip()]
 
 
-def ci_commands():
+def ci_job(name):
+    """Текст джоба `name` из workflow (до следующего джоба того же уровня)."""
     text = WORKFLOW.read_text(encoding="utf-8")
-    return re.findall(r"(?m)^\s*run:\s*(python3 tools/[\w.-]+\.py)", text)
+    m = re.search(r"(?ms)^  %s:[ \t]*\n(.*?)(?=^  \S|\Z)" % re.escape(name),
+                  text)
+    return m.group(1) if m else ""
+
+
+def ci_commands():
+    """Эталонные шаги CI — `run: python3 tools/…` джоба lint.
+
+    Джоб windows гоняет их же одной командой (check-all.py) и в сверку
+    состава не входит.
+    """
+    return re.findall(r"(?m)^\s*run:\s*(python3 tools/[\w.-]+\.py)",
+                      ci_job("lint"))
+
+
+def check_windows_job():
+    # README обещает: джоб windows — те же шаги через tools/check-all.py.
+    runs = re.findall(r"(?m)^\s*run:\s*(.+?)\s*$", ci_job("windows"))
+    check("джоб windows в CI запускает tools/check-all.py",
+          runs, ["python tools/check-all.py"])
 
 
 def run_tool(path, args=(), stdout_encoding="utf-8", extra_env=None):
@@ -304,6 +325,7 @@ def main():
     print("-- состав проверок README ↔ CI ↔ tools/check-all.py")
     check_ci_matches_readme()
     check_ci_matches_check_all()
+    check_windows_job()
     print("-- счётчики README ↔ результаты инструментов")
     check_readme_counts()
     if not os.environ.get(NESTED_ENV):

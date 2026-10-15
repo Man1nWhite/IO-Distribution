@@ -43,11 +43,16 @@ cp1251/cp1252 и падает на «↔», «−», «—» с `UnicodeEncodeEr
 инструмент — то же переключение вывода в UTF-8 (последние строки любого
 `tools/*.py`); за этим следит `check-sync.py`.
 
-CI `.github/workflows/vba-lint.yml` (actions/checkout@v7, setup-python@v7,
-Python 3.12) падает только по ошибкам `E*`; `W*` держат нулём. Кодировка:
-в `.bas` допустимы только символы Windows-1251 — `→`, `…`, `×` писать нельзя
-(линтер даст E01), `«» — •` можно; CRLF защищён `.gitattributes`
-(`*.bas -text` — git не перепишет окончания строк ни при каком `core.autocrlf`).
+CI `.github/workflows/vba-lint.yml`: джоб `lint` (Ubuntu) — шаги выше по
+одному, джоб `windows` — они же одной командой `python tools/check-all.py`
+(настоящий pipe в cp1252 и чекаут с `core.autocrlf=true`). Python 3.12; версии
+actions раз в месяц обновляет Dependabot (`.github/dependabot.yml`), поэтому
+README их не называет. CI падает только по ошибкам `E*`; `W*` держат нулём.
+
+Кодировка: в `.bas` допустимы только символы Windows-1251 — `→`, `…`, `×`
+писать нельзя (линтер даст E01), `«» — •` можно; CRLF защищён `.gitattributes`
+(`*.bas -text`, так же `*.cls` и `*.frm` — git не перепишет окончания строк ни
+при каком `core.autocrlf`).
 
 ## Пример: `Example.xlsx`
 

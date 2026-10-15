@@ -3,6 +3,11 @@
 # этого атрибута `core.autocrlf=true` (умолчание Git for Windows) при первом же
 # коммите сложил бы в blob LF вместо CRLF — локально всё зелено, CI красный.
 *.bas -text
+# Модули классов и формы VBE экспортируются так же (Windows-1251 + CRLF);
+# .frx — бинарная часть формы.
+*.cls -text
+*.frm -text
+*.frx binary
 
 # Книги Excel — бинарники, никаких сравнений построчно.
 *.xlsx binary
