@@ -5,23 +5,27 @@ on:
     paths:
       - '**/*.bas'
       - '**/*.cls'
-      - 'tools/vba-lint.py'
-      - 'tools/parse-spec.py'
-      - 'tools/plan-spec.py'
-      - 'tools/check-readme-map.py'
+      - 'tools/**'
       - 'README.md'
       - '.github/workflows/vba-lint.yml'
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
-          python-version: '3.x'
+          python-version: '3.12'
       - name: Static check of VBA modules (Module1.bas)
         run: python3 tools/vba-lint.py
       - name: Number-from-text parsing spec (ЧислоИзТекста)
@@ -30,3 +34,5 @@ jobs:
         run: python3 tools/plan-spec.py
       - name: README procedure map vs code
         run: python3 tools/check-readme-map.py
+      - name: Mirrors, constants and README claims vs code
+        run: python3 tools/check-sync.py

@@ -1,0 +1,17 @@
+# Временные файлы Excel (создаются при открытии книги)
+~$*
+
+# Копии книг и бэкапы
+*.xlsx.bak
+*.xlsm.bak
+*.bak
+
+# Python
+__pycache__/
+*.pyc
+
+# ОС и редакторы
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
