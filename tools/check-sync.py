@@ -25,7 +25,9 @@
      `PLAN_NODE_LIMIT`, …), ↔ их значения в Module1.bas; имя, которого в
      коде нет, — тоже расхождение (константу переименовали, README забыли);
   8. номера `Err.Raise vbObjectError + N` ↔ таблица «Ошибки» в README, в обе
-     стороны: новая ошибка описана, описанная — существует.
+     стороны: новая ошибка описана, описанная — существует;
+  9. векторы самопроверки ТестРазбораЧисел (Module1.bas, гоняется в Excel)
+     ↔ VECTORS / WRAP из tools/parse-spec.py.
 
 Что НЕ проверяется: сами правила разбора и укладки (они переносятся по смыслу)
 — только их параметры и обещанные числа.
@@ -35,8 +37,10 @@
 
 import os
 import re
+import runpy
 import subprocess
 import sys
+from collections import Counter
 from decimal import Decimal
 from pathlib import Path
 
@@ -245,6 +249,40 @@ def check_error_codes():
           as_ranges(code), as_ranges(doc) if doc is not None else None)
 
 
+# Строковое выражение VBA из литералов и ChrW(N): "1" & ChrW(160) & "500".
+VBA_STR = r'(?:"(?:[^"]|"")*"|ChrW\$?\(\d+\))'
+VBA_TEST_CALL = re.compile(
+    r"(?m)^\s*(ТестЧисла|ТестЦелого)\s+(%s(?:\s*&\s*%s)*)\s*,"
+    r"\s*(-?MAX_LONG|-?\d+(?:\.\d+)?)\s*,\s*n\s*,\s*bad\s*$"
+    % (VBA_STR, VBA_STR))
+
+
+def vba_string(expr):
+    parts = re.findall(r'"((?:[^"]|"")*)"|ChrW\$?\((\d+)\)', expr)
+    return "".join(chr(int(code)) if code else lit.replace('""', '"')
+                   for lit, code in parts)
+
+
+def check_parse_vectors():
+    # ТестРазбораЧисел гоняет векторы parse-spec.py в самом Excel; список в
+    # VBA — копия, и она не должна отставать. got — только в VBA, want —
+    # только в parse-spec.py: сходятся, когда оба пусты.
+    spec = runpy.run_path(str(PARSE_SPEC))
+    top = spec["MAX_LONG"]
+    py = {"ТестЧисла": Counter((s, float(w)) for s, w in spec["VECTORS"]),
+          "ТестЦелого": Counter((s, float(w)) for s, w in spec["WRAP"])}
+    vba = {"ТестЧисла": Counter(), "ТестЦелого": Counter()}
+    for kind, expr, num in VBA_TEST_CALL.findall(bas_text()):
+        want = {"MAX_LONG": top, "-MAX_LONG": -top}.get(num)
+        vba[kind][(vba_string(expr), float(num if want is None else want))] += 1
+    for kind, func, table in (("ТестЧисла", "ЧислоИзТекста", "VECTORS"),
+                              ("ТестЦелого", "ИзвлечьЧисло", "WRAP")):
+        check("векторы %s: ТестРазбораЧисел (Module1.bas) == %s "
+              "(tools/parse-spec.py)" % (func, table),
+              sorted((vba[kind] - py[kind]).elements()),
+              sorted((py[kind] - vba[kind]).elements()))
+
+
 def readme_commands():
     m = re.search(r"## Проверки\n\n```sh\n(.*?)```", readme(), re.S)
     if not m:
@@ -370,6 +408,8 @@ def main():
     check_rows_and_widths()
     print("-- номера ошибок Module1.bas ↔ README")
     check_error_codes()
+    print("-- векторы разбора: ТестРазбораЧисел (VBA) ↔ tools/parse-spec.py")
+    check_parse_vectors()
     print("-- состав проверок README ↔ CI ↔ tools/check-all.py")
     check_ci_matches_readme()
     check_ci_matches_check_all()
