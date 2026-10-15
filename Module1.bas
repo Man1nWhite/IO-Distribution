@@ -1031,6 +1031,7 @@ Private Function –азместить—в€зкуЌа—вободной–ейке( _
     Dim totalLen As Double
 
     If bPlaced(bid) Then Exit Function
+    If bDioOwner(bid) <> 0 Then Exit Function
     If ¬идЎкафа(cabId) <> bKind(bid) Then Exit Function
 
     ReDim items(1 To 16)
@@ -1819,11 +1820,12 @@ Private Function SearchBlocks( _
     Next i
 End Function
 
-' ћ€гкое дробление группы: св€зки остаютс€ ÷≈Ћџћ», дробитс€ только один
-' (самый широкий) составной блок, поэтому св€зность [–еле + его барьеры]
-' сохран€етс€ дл€ всех остальных св€зок группы. ≈сли ни один вариант не
-' уложилс€, вызывающий код переходит к штатному дроблению на отдельные
-' элементы.
+' ћ€гкое дробление группы: св€зки остаютс€ ÷≈Ћџћ» настолько, насколько это
+' возможно. ‘аза 1 Ч дробитс€ ровно ќƒ»Ќ составной блок, по очереди от самого
+' широкого (остальные св€зки [–еле + его барьеры] целы). ‘аза 2 Ч к самому
+' широкому блоку добавл€етс€ следующий по ширине, и так далее. ≈сли ни один
+' вариант не уложилс€, вызывающий код переходит к штатному дроблению на
+' отдельные элементы.
 Private Function TryPlacePartialSplit( _
     ByVal cabId As Long, ByVal kind As String, _
     ByRef items() As Long, ByRef blocks() As Long, _
@@ -1836,12 +1838,14 @@ Private Function TryPlacePartialSplit( _
     Dim blkCnt() As Long
     Dim blkLen() As Double
     Dim done() As Boolean
+    Dim tried() As Boolean
     Dim plan() As Long
 
     Dim blk As Long
     Dim best As Long
     Dim nextId As Long
     Dim partN As Long
+    Dim phase As Long
     Dim nTry As Long
     Dim j As Long
 
@@ -1852,6 +1856,7 @@ Private Function TryPlacePartialSplit( _
     ReDim blkCnt(1 To nBlk)
     ReDim blkLen(1 To nBlk)
     ReDim done(1 To nBlk)
+    ReDim tried(1 To nBlk)
     ReDim blkMap(1 To nBlk)
 
     For j = 1 To n
@@ -1863,63 +1868,81 @@ Private Function TryPlacePartialSplit( _
         blkLen(blk) = blkLen(blk) + mLen(items(j))
     Next j
 
-    ' ѕоочерЄдно дробитс€ один самый широкий составной блок (>1 элемента).
-    For nTry = 1 To nBlk
-        best = 0
-
+    For phase = 1 To 2
         For blk = 1 To nBlk
-            If blkCnt(blk) > 1 And Not done(blk) Then
-                If best = 0 Then
-                    best = blk
-                ElseIf blkLen(blk) > blkLen(best) + PLAN_EPS Then
-                    best = blk
+            done(blk) = False
+            tried(blk) = False
+        Next blk
+
+        For nTry = 1 To nBlk
+            best = 0
+
+            For blk = 1 To nBlk
+                If blkCnt(blk) > 1 And Not tried(blk) Then
+                    If best = 0 Then
+                        best = blk
+                    ElseIf blkLen(blk) > blkLen(best) + PLAN_EPS Then
+                        best = blk
+                    End If
                 End If
+            Next blk
+
+            If best = 0 Then Exit For
+
+            tried(best) = True
+
+            ' ‘аза 1 дробит по одному блоку, фаза 2 накапливает их.
+            If phase = 1 Then
+                For blk = 1 To nBlk
+                    done(blk) = False
+                Next blk
             End If
-        Next blk
 
-        If best = 0 Then Exit Function
+            done(best) = True
 
-        done(best) = True
+            ' ¬ариант блоков: раздробленные Ч по элементам, остальные целиком.
+            nextId = 0
 
-        ' ¬ариант блоков: выбранный Ч по элементам, остальные Ч целиком.
-        nextId = 0
+            For blk = 1 To nBlk
+                blkMap(blk) = 0
 
-        For blk = 1 To nBlk
-            blkMap(blk) = 0
+                If blkCnt(blk) > 0 And Not done(blk) Then
+                    nextId = nextId + 1
+                    blkMap(blk) = nextId
+                End If
+            Next blk
 
-            If blkCnt(blk) > 0 And blk <> best Then
-                nextId = nextId + 1
-                blkMap(blk) = nextId
+            ReDim part(1 To n)
+            partN = nextId
+
+            For j = 1 To n
+                If done(blocks(j)) Then
+                    partN = partN + 1
+                    part(j) = partN
+                Else
+                    part(j) = blkMap(blocks(j))
+                End If
+            Next j
+
+            ' ÷елых блоков не осталось Ч это штатный фоллбэк вызывающего.
+            If partN >= n Then Exit For
+
+            If TryPlanBlocks( _
+                cabId, kind, items, part, n, partN, _
+                plan, localLimit) Then
+
+                CommitPlan items, part, n, plan, railsUsed
+                TryPlacePartialSplit = True
+                Exit Function
             End If
-        Next blk
 
-        ReDim part(1 To n)
-        partN = nextId
-
-        For j = 1 To n
-            If blocks(j) = best Then
-                partN = partN + 1
-                part(j) = partN
-            Else
-                part(j) = blkMap(blocks(j))
+            ' ѕредел поиска уже достигнут: следующие варианты только дороже.
+            If localLimit Then
+                hitLimit = True
+                Exit Function
             End If
-        Next j
-
-        If TryPlanBlocks( _
-            cabId, kind, items, part, n, partN, _
-            plan, localLimit) Then
-
-            CommitPlan items, part, n, plan, railsUsed
-            TryPlacePartialSplit = True
-            Exit Function
-        End If
-
-        ' ѕредел поиска уже достигнут: следующие варианты только дороже.
-        If localLimit Then
-            hitLimit = True
-            Exit Function
-        End If
-    Next nTry
+        Next nTry
+    Next phase
 End Function
 
 Private Sub CommitPlan( _
