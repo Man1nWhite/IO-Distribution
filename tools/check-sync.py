@@ -23,7 +23,9 @@
      «↔», «−», «—» и кириллица роняют инструмент (UnicodeEncodeError);
   7. константы, названные в README как «`ИМЯ` = N» (`MAX_LONG`, `MAX_QTY`,
      `PLAN_NODE_LIMIT`, …), ↔ их значения в Module1.bas; имя, которого в
-     коде нет, — тоже расхождение (константу переименовали, README забыли).
+     коде нет, — тоже расхождение (константу переименовали, README забыли);
+  8. номера `Err.Raise vbObjectError + N` ↔ таблица «Ошибки» в README, в обе
+     стороны: новая ошибка описана, описанная — существует.
 
 Что НЕ проверяется: сами правила разбора и укладки (они переносятся по смыслу)
 — только их параметры и обещанные числа.
@@ -199,6 +201,50 @@ def check_rows_and_widths():
           got, doc_fallback)
 
 
+def as_ranges(nums):
+    """[10, 11, 12, 15] → «10–12, 15»: расхождение видно с одного взгляда."""
+    out = []
+    for n in sorted(nums):
+        if out and out[-1][1] == n - 1:
+            out[-1][1] = n
+        else:
+            out.append([n, n])
+    return ", ".join(str(a) if a == b else "%d–%d" % (a, b) for a, b in out)
+
+
+def readme_error_codes():
+    """Номера из первого столбца таблицы раздела «Ошибки» README.
+
+    Ячейки вида «10 / 11», «**28**», «20–27, 33–37, 40»: диапазоны через
+    тире раскрываются, разделители — «,» и «/».
+    """
+    m = re.search(r"(?ms)^## Ошибки.*?\n(.*?)(?=^## |\Z)", readme())
+    if not m:
+        return None
+    nums = set()
+    for line in m.group(1).splitlines():
+        if not line.startswith("| ") or line.startswith("| N "):
+            continue
+        for tok in re.split(r"[,/]", line.split("|")[1].replace("*", "")):
+            tok = tok.strip()
+            span = re.fullmatch(r"(\d+)\s*[–-]\s*(\d+)", tok)
+            if span:
+                nums.update(range(int(span.group(1)), int(span.group(2)) + 1))
+            elif tok.isdigit():
+                nums.add(int(tok))
+    return nums
+
+
+def check_error_codes():
+    # Каждый Err.Raise vbObjectError + N описан в README, и README не
+    # обещает номеров, которых в коде нет (диапазон «60–78» при отсутствии
+    # 74 — тоже расхождение).
+    code = {int(n) for n in re.findall(r"vbObjectError \+ (\d+)", bas_text())}
+    doc = readme_error_codes()
+    check("номера ошибок vbObjectError + N == таблица «Ошибки» в README",
+          as_ranges(code), as_ranges(doc) if doc is not None else None)
+
+
 def readme_commands():
     m = re.search(r"## Проверки\n\n```sh\n(.*?)```", readme(), re.S)
     if not m:
@@ -322,6 +368,8 @@ def main():
     check_readme_constants()
     print("-- таблицы строк и ширин Module1.bas ↔ README")
     check_rows_and_widths()
+    print("-- номера ошибок Module1.bas ↔ README")
+    check_error_codes()
     print("-- состав проверок README ↔ CI ↔ tools/check-all.py")
     check_ci_matches_readme()
     check_ci_matches_check_all()
