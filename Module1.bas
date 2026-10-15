@@ -69,6 +69,12 @@ Private Const SWITCH_RAILS As Long = 1
 Private Const COL_NAME As String = "C"
 Private Const COL_QTY As String = "D"
 
+' D21 ЂЎкафовї листа Ђ1ї: после расчЄта Ч фактическое число шкафов (от неЄ
+' считает D45). ѕишетс€ только при подписи CAB_LABEL в C21.
+Private Const ADDR_CAB_COUNT As String = "D21"
+Private Const ADDR_CAB_LABEL As String = "C21"
+Private Const CAB_LABEL As String = "Ўкафов"
+
 Private Const CTRL_ZONE_MM As Double = 224
 Private Const CTRL_BLOCK_PX As Double = 52
 Private Const CTRL_OFFSET_PX As Double = 56
@@ -82,6 +88,10 @@ Private Const PLAN_SEARCH_BLOCK_LIMIT As Long = 120
 
 ' ѕредел Long: большее значение CLng не переживЄт (ошибка 6, Overflow).
 Private Const MAX_LONG As Double = 2147483647#
+
+' ѕредел количества в строке столбца D: больше Ч почти наверн€ка опечатка,
+' а расчЄт и чертЄж на таком числе элементов идут часами (ошибка 29).
+Private Const MAX_QTY As Long = 10000
 
 ' –ейки и шкафы.
 Private rCab() As Long
@@ -221,6 +231,10 @@ Public Sub —оздать онфигуратор()
     Dim usedCnt As Long
     Dim msg As String
     Dim errText As String
+    Dim errNum As Long
+    Dim errCode As Double
+    Dim errLabel As String
+    Dim reserveText As String
 
     gWarn = vbNullString
     gLastDio = 0
@@ -239,6 +253,12 @@ Public Sub —оздать онфигуратор()
     If wsS Is Nothing Then
         MsgBox "ќЎ»Ѕ ј: не найден лист ""Service"".", vbCritical
         Exit Sub
+    End If
+
+    ' D26 и €чейки сигналов (V10/X10/AA10/AC10) Ч формулы, а читаетс€ их
+    ' значение: при ручном режиме вычислений оно могло устареть.
+    If Application.Calculation <> xlCalculationAutomatic Then
+        Application.Calculate
     End If
 
     ' ѕараметры шкафа. D18 Ч „»—Ћќ –≈≈  ¬  ј∆ƒќћ Ў ј‘”.
@@ -276,10 +296,18 @@ Public Sub —оздать онфигуратор()
     End Select
 
     fv = 0
+    reserveText = vbNullString
     v = ws.Range("D19").Value2
 
-    If Not IsError(v) Then
-        If IsNumeric(v) Then fv = CDbl(v)
+    ' “екст (Ђ20 %ї) разбираетс€ „исло»з“екста, как в B18/D18/столбце D, и
+    ' всегда даЄт предупреждение Ч иначе 0 % резерва был бы незаметен.
+    If Not IsError(v) And Not IsEmpty(v) Then
+        If IsNumeric(v) Then
+            fv = CDbl(v)
+        Else
+            reserveText = Trim$(CStr(v))
+            If Len(reserveText) > 0 Then fv = „исло»з“екста(reserveText)
+        End If
     End If
 
     If fv > 1 Then
@@ -294,6 +322,12 @@ Public Sub —оздать онфигуратор()
         gFreeFrac = 0.9
         gWarn = gWarn & vbCrLf & _
             "  Х –езерв D19 ограничен значением 90%."
+    End If
+
+    If Len(reserveText) > 0 Then
+        gWarn = gWarn & vbCrLf & _
+            "  Х D19: резерв записан текстом (""" & reserveText & _
+            """); прин€то " & Format(gFreeFrac, "0%") & "."
     End If
 
     gSeparateMode = ƒа(ws.Range("D13").Value2)
@@ -327,7 +361,8 @@ Public Sub —оздать онфигуратор()
     defRows = Array(27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, _
                     47, 48, 49, 50, 51, 52, 53, 54, 55)
 
-    ' ѕроверка текстовых количеств: одно предупреждение на строку.
+    ' —толбец D до расчЄта: текст Ч одно предупреждение на строку,
+    ' количество больше MAX_QTY Ч ошибка 29 (до любых ReDim).
     For t = LBound(defRows) To UBound(defRows)
         ѕроверитьячейку ол ws, CLng(defRows(t))
     Next t
@@ -571,11 +606,14 @@ Public Sub —оздать онфигуратор()
                 "ƒл€ совместного размещени€ установите D13=NO."
         End If
 
-        If ≈сть¬—емействе(FAM_AI, False) And _
+        ' ќбщий пул AI/AO (строка 52) садитс€ и на выходы AO TC-модул€
+        ' (Ё“јѕ 2.2) Ч тот же разрыв, даже когда модулей 30Ц32 нет.
+        If (≈сть¬—емействе(FAM_AI, False) Or Ѕарьеры52Ќа¬ыходахTC()) And _
            ≈сть¬—емействе(FAM_AI, True) Then
 
             Err.Raise vbObjectError + 19, , _
-                "D13=YES раздел€ет модуль AI/AO и его барьеры. " & _
+                "D13=YES раздел€ет модуль AI/AO (или выходы AO модул€ " & _
+                "TC/RTD) и его барьеры. " & _
                 "ƒл€ совместного размещени€ установите D13=NO."
         End If
     End If
@@ -839,6 +877,8 @@ Public Sub —оздать онфигуратор()
 
     Application.ScreenUpdating = True
 
+    «аписать„ислоЎкафов ws, usedCnt
+
     msg = "√отово!" & vbCrLf & _
           "Ўкафов задействовано: " & usedCnt
 
@@ -852,10 +892,22 @@ Public Sub —оздать онфигуратор()
     Exit Sub
 
 ErrH:
+    errNum = Err.Number
     errText = Err.Description
     Application.ScreenUpdating = True
 
-    MsgBox "ќшибка конфигуратора:" & vbCrLf & vbCrLf & _
+    ' Ќомер N из таблицы ошибок README (vbObjectError + N) Ч пр€мо в окне:
+    ' под обработчиком отладчик на ошибке не останавливаетс€. »наче это
+    ' сбой самого VBA/Excel, и его номер нужен дл€ сообщени€ разработчику.
+    errCode = CDbl(errNum) - CDbl(vbObjectError)
+
+    If errCode >= 1 And errCode <= 999 Then
+        errLabel = "код " & Format(errCode, "0")
+    Else
+        errLabel = "ошибка VBA " & errNum
+    End If
+
+    MsgBox "ќшибка конфигуратора (" & errLabel & "):" & vbCrLf & vbCrLf & _
            errText, vbCritical
 End Sub
 
@@ -2200,6 +2252,24 @@ Private Function ≈сть¬—емействе( _
     Next i
 End Function
 
+' ≈сть барьеры общего пула AI/AO (строка 52) и TC-модуль с выходами AO:
+' при D13=NO такие барьеры сад€тс€ на эти выходы (Ё“јѕ 2.2).
+Private Function Ѕарьеры52Ќа¬ыходахTC() As Boolean
+    Dim i As Long
+    Dim hasBar As Boolean
+    Dim hasAO As Boolean
+
+    For i = 1 To gTotalMods
+        If mIsBar(i) Then
+            If mAnDir(i) = DIR_AI_AO Then hasBar = True
+        ElseIf mFam(i) = FAM_TC Then
+            If mCapAO(i) > 0 Then hasAO = True
+        End If
+    Next i
+
+    Ѕарьеры52Ќа¬ыходахTC = hasBar And hasAO
+End Function
+
 Private Sub —ортировать„астьѕоƒлине( _
     ByRef items() As Long, _
     ByVal firstIdx As Long, ByVal lastIdx As Long)
@@ -3018,7 +3088,9 @@ End Function
 ' —толбец D об€зан содержать число. ≈сли там текст, количество берЄтс€ из
 ' первой группы цифр Ч и об€зательно попадает в предупреждение, чтобы тиха€
 ' подмена (или тихий пропуск строки) не осталась незаметной. „исло, пуста€
-' €чейка, пробелы и ошибка Ч молча; на строку одно сообщение.
+' €чейка, пробелы и ошибка Ч молча; на строку одно сообщение.  оличество
+' больше MAX_QTY (числом или текстом) Ч ошибка 29: опечатка вроде 1000000
+' вместо 10 иначе дала бы Overflow, Out of memory или многочасовой расчЄт.
 Private Sub ѕроверитьячейку ол(ByVal ws As Worksheet, ByVal r As Long)
     Dim v As Variant
     Dim t As String
@@ -3028,12 +3100,20 @@ Private Sub ѕроверитьячейку ол(ByVal ws As Worksheet, ByVal r As Long)
 
     If IsError(v) Then Exit Sub
     If IsEmpty(v) Then Exit Sub
+
+    q = „итать ол(ws, r)
+
+    If q > MAX_QTY Then
+        Err.Raise vbObjectError + 29, , _
+            "—трока " & r & ", столбец " & COL_QTY & ": количество " & _
+            q & " больше предела " & MAX_QTY & " шт. на строку." & _
+            vbCrLf & "ѕроверьте €чейку Ч похоже на опечатку."
+    End If
+
     If IsNumeric(v) Then Exit Sub
 
     t = Trim$(CStr(v))
     If Len(t) = 0 Then Exit Sub
-
-    q = „итать ол(ws, r)
 
     If q > 0 Then
         gWarn = gWarn & vbCrLf & _
@@ -3044,6 +3124,31 @@ Private Sub ѕроверитьячейку ол(ByVal ws As Worksheet, ByVal r As Long)
         gWarn = gWarn & vbCrLf & _
             "  Х —трока " & r & ", столбец " & COL_QTY & _
             ": """ & t & """ Ч не число; строка не участвует в расчЄте."
+    End If
+End Sub
+
+' D21 ЂЎкафовї Ч формула-оценка листа Ђ1ї (от неЄ считает D45): после
+' успешного расчЄта в неЄ пишетс€ фактическое число шкафов раскладки.
+' “олько при подписи ЂЎкафовї в C21, чтобы не затереть чужую €чейку;
+' защищЄнный лист Ч предупреждение, а не ошибка: раскладка уже готова.
+Private Sub «аписать„ислоЎкафов(ByVal ws As Worksheet, ByVal n As Long)
+    Dim lbl As Variant
+    Dim errText As String
+
+    lbl = ws.Range(ADDR_CAB_LABEL).Value2
+
+    If IsError(lbl) Then Exit Sub
+    If UCase$(Trim$(CStr(lbl))) <> UCase$(CAB_LABEL) Then Exit Sub
+
+    On Error Resume Next
+    ws.Range(ADDR_CAB_COUNT).Value2 = n
+    errText = Err.Description
+    On Error GoTo 0
+
+    If Len(errText) > 0 Then
+        gWarn = gWarn & vbCrLf & _
+            "  Х " & ADDR_CAB_COUNT & " не обновлена (" & errText & _
+            "); шкафов по раскладке: " & n & "."
     End If
 End Sub
 
@@ -3262,6 +3367,97 @@ Private Function »звлечь„исло(ByVal v As Variant) As Long
 
     »звлечь„исло = CLng(d)
 End Function
+
+' —амопроверка разбора чисел пр€мо в Excel (VBA в CI не запускаетс€): те же
+' векторы, что в tools/parse-spec.py, Ч их совпадение свер€ет
+' tools/check-sync.py. «апуск: Alt+F11 -> курсор внутри процедуры -> F5.
+Private Sub “ест–азбора„исел()
+    Dim n As Long
+    Dim bad As String
+
+    ' „исло»з“екста: текст -> Double, локаль не участвует.
+    “ест„исла "2000", 2000, n, bad
+    “ест„исла "1 500", 1500, n, bad
+    “ест„исла "1 500 мм", 1500, n, bad
+    “ест„исла "-500", -500, n, bad
+    “ест„исла ChrW(8722) & "500", -500, n, bad
+    “ест„исла "2000,5", 2000.5, n, bad
+    “ест„исла "2000.5", 2000.5, n, bad
+    “ест„исла "5 шт 160", 5, n, bad
+    “ест„исла "4", 4, n, bad
+    “ест„исла "D18 = 4", 18, n, bad
+    “ест„исла "нет", 0, n, bad
+    “ест„исла "", 0, n, bad
+    “ест„исла "1 500 000", 1500000, n, bad
+    “ест„исла "1  500", 1, n, bad
+    “ест„исла "1,234", 1.234, n, bad
+    “ест„исла "12 345", 12345, n, bad
+    “ест„исла "1 000", 1000, n, bad
+    “ест„исла "2000,", 2000, n, bad
+    “ест„исла "LPA-340-100", 340, n, bad
+    “ест„исла "1.234.567", 1.234, n, bad
+    “ест„исла "0,9", 0.9, n, bad
+    “ест„исла "5-3", 5, n, bad
+    “ест„исла "12345 678", 12345, n, bad
+    “ест„исла ChrW(160) & "1" & ChrW(160) & "500", 1500, n, bad
+    “ест„исла "+6", 6, n, bad
+    “ест„исла "20 %", 20, n, bad
+    “ест„исла "резерв 15%", 15, n, bad
+
+    ' »звлечь„исло: Fix и предел Long; сначала ветка IsNumeric -> CDbl.
+    “ест÷елого "2000", 2000, n, bad
+    “ест÷елого "-500", -500, n, bad
+    “ест÷елого "2000,5", 2000, n, bad
+    “ест÷елого "3,6", 3, n, bad
+    “ест÷елого "99999999999", MAX_LONG, n, bad
+    “ест÷елого "-99999999999", -MAX_LONG, n, bad
+    “ест÷елого "1 500", 1500, n, bad
+    “ест÷елого "нет", 0, n, bad
+    “ест÷елого "", 0, n, bad
+
+    If Len(bad) = 0 Then
+        MsgBox "–азбор чисел: " & n & " векторов, расхождений нет.", _
+               vbInformation
+        Exit Sub
+    End If
+
+    ' ƒес€тична€ точка в системе: IsNumeric -> CDbl читает Ђ2000,5ї как
+    ' 20005 Ч известна€ зависимость от локали, а не ошибка разбора.
+    If InStr(CStr(1.5), ",") = 0 Then
+        bad = bad & vbCrLf & vbCrLf & _
+            "ƒес€тичный разделитель системы Ч точка: векторы »звлечь„исло " & _
+            "с зап€той здесь не сход€тс€ (ветка IsNumeric -> CDbl, README, " & _
+            "Ђ–азбор чисел из текстаї)."
+    End If
+
+    MsgBox "–азбор чисел: " & n & " векторов, расхождени€:" & bad, vbCritical
+End Sub
+
+Private Sub “ест„исла(ByVal s As String, ByVal want As Double, _
+                      ByRef n As Long, ByRef bad As String)
+    Dim got As Double
+
+    n = n + 1
+    got = „исло»з“екста(s)
+
+    If Abs(got - want) > 0.000000001 Then
+        bad = bad & vbCrLf & "  „исло»з“екста(""" & s & """) = " & got & _
+              ", ожидалось " & want
+    End If
+End Sub
+
+Private Sub “ест÷елого(ByVal s As String, ByVal want As Double, _
+                       ByRef n As Long, ByRef bad As String)
+    Dim got As Long
+
+    n = n + 1
+    got = »звлечь„исло(s)
+
+    If got <> want Then
+        bad = bad & vbCrLf & "  »звлечь„исло(""" & s & """) = " & got & _
+              ", ожидалось " & want
+    End If
+End Sub
 
 '=============================================================================
 ' ќ“–»—ќ¬ ј

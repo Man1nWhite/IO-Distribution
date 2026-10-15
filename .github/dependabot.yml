@@ -1,0 +1,8 @@
+# Версии actions/* в .github/workflows — раз в месяц, отдельным PR.
+# README версии actions не называет, поэтому такой PR ничего в нём не ломает.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

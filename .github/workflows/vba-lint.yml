@@ -7,6 +7,8 @@ on:
       - '**/*.cls'
       - 'tools/**'
       - 'README.md'
+      - '**/*.xlsx'
+      - '.gitattributes'
       - '.github/workflows/vba-lint.yml'
   pull_request:
   workflow_dispatch:
@@ -34,5 +36,20 @@ jobs:
         run: python3 tools/plan-spec.py
       - name: README procedure map vs code
         run: python3 tools/check-readme-map.py
+      - name: Example.xlsx vs README and Service
+        run: python3 tools/check-example.py
       - name: Mirrors, constants and README claims vs code
         run: python3 tools/check-sync.py
+
+  windows:
+    # Те же шаги на Windows одной командой: там вывод в pipe — в cp1252, а
+    # чекаут — с core.autocrlf=true; на Linux ни то ни другое не проявляется.
+    # В сверку шагов check-sync.py входит только джоб lint.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: All checks on Windows (tools/check-all.py)
+        run: python tools/check-all.py
