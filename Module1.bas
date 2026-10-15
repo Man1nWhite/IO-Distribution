@@ -297,6 +297,17 @@ Public Sub —оздать онфигуратор()
     gCtrlPerBlock = 1
     If ƒа(ws.Range("D12").Value2) Then gCtrlPerBlock = 2
 
+    ' –езервированна€ пара P410 делит один комплект KDI/KDO: нечЄтное D26
+    ' оставл€ет один шкаф с одним контроллером Ч об этом сообщаем заранее.
+    If gCtrlPerBlock = 2 And ctrlCount > 0 And _
+       (ctrlCount Mod 2) <> 0 Then
+
+        gWarn = gWarn & vbCrLf & _
+            "  Х ¬ D12 выбрано резервирование контроллеров (YES), " & _
+            "но в D26 указано нечЄтное количество P410 (" & _
+            ctrlCount & "); один шкаф будет с 1 контроллером."
+    End If
+
     capFull = gRailLen * (1 - gFreeFrac)
     capCtrl = capFull - CTRL_ZONE_MM
 
@@ -986,13 +997,73 @@ Private Sub «акрепить–еле«а онтроллером( _
            bKind(b) = "M" And _
            “ип—в€зки(b) = relType Then
 
-            If –азместить—в€зку¬Ўкаф(b, cabId) Then
+            ' —начала св€зка целиком Ч на наименее загруженную рейку шкафа:
+            ' так до 4 KDI и 4 KDO расход€тс€ по разным рейкам, а не набиваютс€ на первую.
+            ' Ўтатный планировщик (с дроблением элементов) Ч только если
+            ' св€зка не помещаетс€ на одну рейку целиком.
+            If –азместить—в€зкуЌа—вободной–ейке(b, cabId) Then
+                bCtrlCab(b) = cabId
+                gotCnt = gotCnt + 1
+
+            ElseIf –азместить—в€зку¬Ўкаф(b, cabId) Then
                 bCtrlCab(b) = cabId
                 gotCnt = gotCnt + 1
             End If
         End If
     Next b
 End Sub
+
+' ѕробует уложить св€зку реле контроллера ÷≈Ћ» ќћ на одну рейку шкафа P410:
+' выбираетс€ наименее загруженна€ рейка (максимум свободного места), куда
+' св€зка [–еле + его барьеры] влезает целиком. ≈сли такой рейки нет, ничего не
+' размещаетс€: вызывающий код примен€ет обычный планировщик, вплоть
+' до дроблени€ элементов св€зки по рейкам.
+Private Function –азместить—в€зкуЌа—вободной–ейке( _
+    ByVal bid As Long, ByVal cabId As Long) As Boolean
+
+    Dim items() As Long
+    Dim n As Long
+    Dim i As Long
+    Dim j As Long
+    Dim bestRail As Long
+    Dim bestFree As Double
+    Dim curFree As Double
+    Dim totalLen As Double
+
+    If bPlaced(bid) Then Exit Function
+    If ¬идЎкафа(cabId) <> bKind(bid) Then Exit Function
+
+    ReDim items(1 To 16)
+    —обрать—в€зку bid, items, n
+    totalLen = —уммаƒлин(items, n)
+
+    bestFree = -1
+
+    For i = 1 To railCount
+        If rCab(i) = cabId And rKind(i) = bKind(bid) Then
+            curFree = rCap(i) - rUsed(i)
+
+            If curFree < 0 Then curFree = 0
+
+            If curFree + PLAN_EPS >= totalLen Then
+                If curFree > bestFree Then
+                    bestRail = i
+                    bestFree = curFree
+                End If
+            End If
+        End If
+    Next i
+
+    If bestRail = 0 Then Exit Function
+
+    For j = 1 To n
+        PlaceModule items(j), bestRail
+    Next j
+
+    bPlaced(bid) = True
+    bCab(bid) = cabId
+    –азместить—в€зкуЌа—вободной–ейке = True
+End Function
 
 '=============================================================================
 ' Ќј«Ќј„≈Ќ»≈ ќ—“ј“ ј –≈Ћ≈ ћќƒ”Ћяћ DIO
@@ -1442,6 +1513,17 @@ Private Function TryPlaceGroupInCab( _
     If localLimit Then hitLimit = True
 
     If nBlk < n Then
+        ' —в€зки приоритетны: дробитс€ по одному самый широкий составной
+        ' блок, а остальные остаютс€ неразрывными [–еле + его барьеры].
+        If TryPlacePartialSplit( _
+            cabId, kind, items, blocks, n, nBlk, _
+            railsUsed, hitLimit) Then
+
+            wasSplit = True
+            TryPlaceGroupInCab = True
+            Exit Function
+        End If
+
         ReDim singleBlocks(1 To n)
 
         For j = 1 To n
@@ -1667,6 +1749,7 @@ Private Function SearchBlocks( _
     Dim blk As Long
     Dim i As Long
     Dim j As Long
+    Dim startRail As Long
 
     If hitLimit Then Exit Function
 
@@ -1685,7 +1768,22 @@ Private Function SearchBlocks( _
     blk = ord(level)
     ReDim seenFree(1 To nRails)
 
-    For i = 1 To nRails
+    ' Ѕлоки одинаковой ширины идут в ord подр€д: перестановки равноценны,
+    ' поэтому рейки перебираютс€ начина€ с рейки предыдущего такого блока.
+    startRail = 1
+
+    If level > 1 Then
+        If Abs(blkLen(blk) - blkLen(ord(level - 1))) <= PLAN_EPS Then
+            For i = 1 To nRails
+                If railIds(i) = plan(ord(level - 1)) Then
+                    startRail = i
+                    Exit For
+                End If
+            Next i
+        End If
+    End If
+
+    For i = startRail To nRails
         If freeCap(i) + PLAN_EPS >= blkLen(blk) Then
             duplicate = False
 
@@ -1719,6 +1817,109 @@ Private Function SearchBlocks( _
             End If
         End If
     Next i
+End Function
+
+' ћ€гкое дробление группы: св€зки остаютс€ ÷≈Ћџћ», дробитс€ только один
+' (самый широкий) составной блок, поэтому св€зность [–еле + его барьеры]
+' сохран€етс€ дл€ всех остальных св€зок группы. ≈сли ни один вариант не
+' уложилс€, вызывающий код переходит к штатному дроблению на отдельные
+' элементы.
+Private Function TryPlacePartialSplit( _
+    ByVal cabId As Long, ByVal kind As String, _
+    ByRef items() As Long, ByRef blocks() As Long, _
+    ByVal n As Long, ByVal nBlk As Long, _
+    ByRef railsUsed As Long, _
+    ByRef hitLimit As Boolean) As Boolean
+
+    Dim part() As Long
+    Dim blkMap() As Long
+    Dim blkCnt() As Long
+    Dim blkLen() As Double
+    Dim done() As Boolean
+    Dim plan() As Long
+
+    Dim blk As Long
+    Dim best As Long
+    Dim nextId As Long
+    Dim partN As Long
+    Dim nTry As Long
+    Dim j As Long
+
+    Dim localLimit As Boolean
+
+    If nBlk < 2 Then Exit Function
+
+    ReDim blkCnt(1 To nBlk)
+    ReDim blkLen(1 To nBlk)
+    ReDim done(1 To nBlk)
+    ReDim blkMap(1 To nBlk)
+
+    For j = 1 To n
+        blk = blocks(j)
+
+        If blk < 1 Or blk > nBlk Then Exit Function
+
+        blkCnt(blk) = blkCnt(blk) + 1
+        blkLen(blk) = blkLen(blk) + mLen(items(j))
+    Next j
+
+    ' ѕоочерЄдно дробитс€ один самый широкий составной блок (>1 элемента).
+    For nTry = 1 To nBlk
+        best = 0
+
+        For blk = 1 To nBlk
+            If blkCnt(blk) > 1 And Not done(blk) Then
+                If best = 0 Then
+                    best = blk
+                ElseIf blkLen(blk) > blkLen(best) + PLAN_EPS Then
+                    best = blk
+                End If
+            End If
+        Next blk
+
+        If best = 0 Then Exit Function
+
+        done(best) = True
+
+        ' ¬ариант блоков: выбранный Ч по элементам, остальные Ч целиком.
+        nextId = 0
+
+        For blk = 1 To nBlk
+            blkMap(blk) = 0
+
+            If blkCnt(blk) > 0 And blk <> best Then
+                nextId = nextId + 1
+                blkMap(blk) = nextId
+            End If
+        Next blk
+
+        ReDim part(1 To n)
+        partN = nextId
+
+        For j = 1 To n
+            If blocks(j) = best Then
+                partN = partN + 1
+                part(j) = partN
+            Else
+                part(j) = blkMap(blocks(j))
+            End If
+        Next j
+
+        If TryPlanBlocks( _
+            cabId, kind, items, part, n, partN, _
+            plan, localLimit) Then
+
+            CommitPlan items, part, n, plan, railsUsed
+            TryPlacePartialSplit = True
+            Exit Function
+        End If
+
+        ' ѕредел поиска уже достигнут: следующие варианты только дороже.
+        If localLimit Then
+            hitLimit = True
+            Exit Function
+        End If
+    Next nTry
 End Function
 
 Private Sub CommitPlan( _
@@ -2448,6 +2649,8 @@ Private Sub –аспределитьјналоговыеЅарьеры( _
 
     Dim better As Boolean
     Dim countOld As Boolean
+    Dim oldAI As Long
+    Dim oldCnt As Long
     Dim groupName As String
 
     If gTotalMods <= 0 Then Exit Sub
@@ -2525,8 +2728,13 @@ Private Sub –аспределитьјналоговыеЅарьеры( _
 
     ' ”читываем ранее назначенные барьеры: в общем пуле AI/AO часть входов AI
     ' уже зан€та RTD>AI, а температурные барьеры выходы AO температурного
-    ' модул€ не занимают.
+    ' модул€ не занимают. —трока 51 подключаетс€ только ко входам AI,
+    ' поэтому еЄ вклад в общий пул ограничен mCapAI: выходы AO остаютс€ свободными,
+    ' а превышение прохода 51 не дублируетс€ в overflow прохода 52.
     For k = 1 To nMod
+        oldAI = 0
+        oldCnt = 0
+
         For i = 1 To gTotalMods
 
             If mAnalogOwner(i) = mods(k) Then
@@ -2539,12 +2747,23 @@ Private Sub –аспределитьјналоговыеЅарьеры( _
                 End If
 
                 If countOld Then
-                    usedA(k) = usedA(k) + mCh(i)
-                    cntA(k) = cntA(k) + 1
-                    totalNeed = totalNeed + mCh(i)
+                    oldAI = oldAI + mCh(i)
+                    oldCnt = oldCnt + 1
                 End If
             End If
         Next i
+
+        If dirType = DIR_AI_AO Then
+            ' —вободный остаток дл€ строки 52 равен
+            ' Max(0, mCapAI - usedAI) + mCapAO.
+            If oldAI > mCapAI(mods(k)) Then
+                oldAI = mCapAI(mods(k))
+            End If
+        End If
+
+        usedA(k) = oldAI
+        cntA(k) = oldCnt
+        totalNeed = totalNeed + oldAI
     Next k
 
     For i = 2 To nBar
