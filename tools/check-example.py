@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Example.xlsx против README и против самого себя.
+"""Example.xlsm против README и против самого себя.
 
 Книга читается стандартной библиотекой (zipfile + xml.etree), без openpyxl:
 берутся кэшированные значения ячеек — то, что макрос получает через Value2
@@ -19,8 +19,8 @@
      первую подходящую строку, а выпадающий список в столбце C листа «1»
      может ссылаться на другую (так было с AIO.2.xx/2: 164 и 160 мм).
 
-Запуск: python3 tools/check-example.py [книга.xlsx]  (по умолчанию —
-Example.xlsx в корне репозитория).
+Запуск: python3 tools/check-example.py [книга.xlsm]  (по умолчанию —
+Example.xlsm в корне репозитория).
 Код возврата: 0 — расхождений нет, 1 — есть.
 """
 
@@ -31,7 +31,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-BOOK = ROOT / "Example.xlsx"
+BOOK = ROOT / "Example.xlsm"
 BAS = ROOT / "Module1.bas"
 README = ROOT / "README.md"
 
