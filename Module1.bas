@@ -74,6 +74,9 @@ Private Const CTRL_BLOCK_PX As Double = 52
 Private Const CTRL_OFFSET_PX As Double = 56
 
 Private Const PLAN_EPS As Double = 0.0001
+' —квозной бюджет узлов перебора на одну попытку укладки группы в шкаф:
+' счЄтчик узлов общий дл€ всех вызовов TryPlanBlocks внутри
+' TryPlaceGroupInCab (целые блоки, м€гкое дробление, отдельные элементы).
 Private Const PLAN_NODE_LIMIT As Long = 300000
 Private Const PLAN_SEARCH_BLOCK_LIMIT As Long = 120
 
@@ -1402,6 +1405,8 @@ Private Sub –азместить√руппуDIO( _
         Exit Sub
     End If
 
+    ' hitLimit здесь Ч от последней попытки (пустой шкаф, свежий бюджет):
+    ' 44 = исход не доказан (поиск упЄрс€ в лимит), иначе укладки точно нет.
     If hitLimit Then
         Err.Raise vbObjectError + 44, , _
             "ƒл€ группы """ & mName(modIdx) & _
@@ -1465,6 +1470,7 @@ Private Sub –азместитьјналоговую√руппу( _
         Exit Sub
     End If
 
+    '  ак в –азместить√руппуDIO: 46 Ч предел поиска на пустом шкафу, иначе 47.
     If hitLimit Then
         Err.Raise vbObjectError + 46, , _
             "Ќе удалось подобрать укладку дл€ модул€ """ & _
@@ -1497,6 +1503,7 @@ Private Function TryPlaceGroupInCab( _
     Dim singleBlocks() As Long
     Dim localLimit As Boolean
     Dim j As Long
+    Dim nodes As Long
 
     railsUsed = 0
     wasSplit = False
@@ -1504,7 +1511,7 @@ Private Function TryPlaceGroupInCab( _
 
     If TryPlanBlocks( _
         cabId, kind, items, blocks, n, nBlk, _
-        plan, localLimit) Then
+        plan, localLimit, nodes) Then
 
         CommitPlan items, blocks, n, plan, railsUsed
         TryPlaceGroupInCab = True
@@ -1518,7 +1525,7 @@ Private Function TryPlaceGroupInCab( _
         ' блок, а остальные остаютс€ неразрывными [–еле + его барьеры].
         If TryPlacePartialSplit( _
             cabId, kind, items, blocks, n, nBlk, _
-            railsUsed, hitLimit) Then
+            railsUsed, hitLimit, nodes) Then
 
             wasSplit = True
             TryPlaceGroupInCab = True
@@ -1533,7 +1540,7 @@ Private Function TryPlaceGroupInCab( _
 
         If TryPlanBlocks( _
             cabId, kind, items, singleBlocks, n, n, _
-            plan, localLimit) Then
+            plan, localLimit, nodes) Then
 
             CommitPlan items, singleBlocks, n, _
                        plan, railsUsed
@@ -1552,7 +1559,8 @@ Private Function TryPlanBlocks( _
     ByRef items() As Long, ByRef blocks() As Long, _
     ByVal n As Long, ByVal nBlk As Long, _
     ByRef plan() As Long, _
-    ByRef hitLimit As Boolean) As Boolean
+    ByRef hitLimit As Boolean, _
+    ByRef nodes As Long) As Boolean
 
     Dim blkLen() As Double
     Dim railIds() As Long
@@ -1566,7 +1574,6 @@ Private Function TryPlanBlocks( _
     Dim blk As Long
     Dim tmp As Long
     Dim best As Long
-    Dim nodes As Long
 
     Dim totalLen As Double
     Dim totalFree As Double
@@ -1725,8 +1732,6 @@ Private Function TryPlanBlocks( _
         plan(blk) = 0
     Next blk
 
-    nodes = 0
-
     If SearchBlocks( _
         1, nBlk, ord, blkLen, railIds, nRails, _
         freeCap, plan, nodes, hitLimit) Then
@@ -1831,7 +1836,8 @@ Private Function TryPlacePartialSplit( _
     ByRef items() As Long, ByRef blocks() As Long, _
     ByVal n As Long, ByVal nBlk As Long, _
     ByRef railsUsed As Long, _
-    ByRef hitLimit As Boolean) As Boolean
+    ByRef hitLimit As Boolean, _
+    ByRef nodes As Long) As Boolean
 
     Dim part() As Long
     Dim blkMap() As Long
@@ -1929,7 +1935,7 @@ Private Function TryPlacePartialSplit( _
 
             If TryPlanBlocks( _
                 cabId, kind, items, part, n, partN, _
-                plan, localLimit) Then
+                plan, localLimit, nodes) Then
 
                 CommitPlan items, part, n, plan, railsUsed
                 TryPlacePartialSplit = True
