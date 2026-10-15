@@ -69,6 +69,12 @@ Private Const SWITCH_RAILS As Long = 1
 Private Const COL_NAME As String = "C"
 Private Const COL_QTY As String = "D"
 
+' D21 ЂЎкафовї листа Ђ1ї: после расчЄта Ч фактическое число шкафов (от неЄ
+' считает D45). ѕишетс€ только при подписи CAB_LABEL в C21.
+Private Const ADDR_CAB_COUNT As String = "D21"
+Private Const ADDR_CAB_LABEL As String = "C21"
+Private Const CAB_LABEL As String = "Ўкафов"
+
 Private Const CTRL_ZONE_MM As Double = 224
 Private Const CTRL_BLOCK_PX As Double = 52
 Private Const CTRL_OFFSET_PX As Double = 56
@@ -600,11 +606,14 @@ Public Sub —оздать онфигуратор()
                 "ƒл€ совместного размещени€ установите D13=NO."
         End If
 
-        If ≈сть¬—емействе(FAM_AI, False) And _
+        ' ќбщий пул AI/AO (строка 52) садитс€ и на выходы AO TC-модул€
+        ' (Ё“јѕ 2.2) Ч тот же разрыв, даже когда модулей 30Ц32 нет.
+        If (≈сть¬—емействе(FAM_AI, False) Or Ѕарьеры52Ќа¬ыходахTC()) And _
            ≈сть¬—емействе(FAM_AI, True) Then
 
             Err.Raise vbObjectError + 19, , _
-                "D13=YES раздел€ет модуль AI/AO и его барьеры. " & _
+                "D13=YES раздел€ет модуль AI/AO (или выходы AO модул€ " & _
+                "TC/RTD) и его барьеры. " & _
                 "ƒл€ совместного размещени€ установите D13=NO."
         End If
     End If
@@ -867,6 +876,8 @@ Public Sub —оздать онфигуратор()
                            legColor, legN, ctrlCount, usedCnt
 
     Application.ScreenUpdating = True
+
+    «аписать„ислоЎкафов ws, usedCnt
 
     msg = "√отово!" & vbCrLf & _
           "Ўкафов задействовано: " & usedCnt
@@ -2241,6 +2252,24 @@ Private Function ≈сть¬—емействе( _
     Next i
 End Function
 
+' ≈сть барьеры общего пула AI/AO (строка 52) и TC-модуль с выходами AO:
+' при D13=NO такие барьеры сад€тс€ на эти выходы (Ё“јѕ 2.2).
+Private Function Ѕарьеры52Ќа¬ыходахTC() As Boolean
+    Dim i As Long
+    Dim hasBar As Boolean
+    Dim hasAO As Boolean
+
+    For i = 1 To gTotalMods
+        If mIsBar(i) Then
+            If mAnDir(i) = DIR_AI_AO Then hasBar = True
+        ElseIf mFam(i) = FAM_TC Then
+            If mCapAO(i) > 0 Then hasAO = True
+        End If
+    Next i
+
+    Ѕарьеры52Ќа¬ыходахTC = hasBar And hasAO
+End Function
+
 Private Sub —ортировать„астьѕоƒлине( _
     ByRef items() As Long, _
     ByVal firstIdx As Long, ByVal lastIdx As Long)
@@ -3095,6 +3124,31 @@ Private Sub ѕроверитьячейку ол(ByVal ws As Worksheet, ByVal r As Long)
         gWarn = gWarn & vbCrLf & _
             "  Х —трока " & r & ", столбец " & COL_QTY & _
             ": """ & t & """ Ч не число; строка не участвует в расчЄте."
+    End If
+End Sub
+
+' D21 ЂЎкафовї Ч формула-оценка листа Ђ1ї (от неЄ считает D45): после
+' успешного расчЄта в неЄ пишетс€ фактическое число шкафов раскладки.
+' “олько при подписи ЂЎкафовї в C21, чтобы не затереть чужую €чейку;
+' защищЄнный лист Ч предупреждение, а не ошибка: раскладка уже готова.
+Private Sub «аписать„ислоЎкафов(ByVal ws As Worksheet, ByVal n As Long)
+    Dim lbl As Variant
+    Dim errText As String
+
+    lbl = ws.Range(ADDR_CAB_LABEL).Value2
+
+    If IsError(lbl) Then Exit Sub
+    If UCase$(Trim$(CStr(lbl))) <> UCase$(CAB_LABEL) Then Exit Sub
+
+    On Error Resume Next
+    ws.Range(ADDR_CAB_COUNT).Value2 = n
+    errText = Err.Description
+    On Error GoTo 0
+
+    If Len(errText) > 0 Then
+        gWarn = gWarn & vbCrLf & _
+            "  Х " & ADDR_CAB_COUNT & " не обновлена (" & errText & _
+            "); шкафов по раскладке: " & n & "."
     End If
 End Sub
 
