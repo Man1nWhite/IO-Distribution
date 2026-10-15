@@ -83,6 +83,10 @@ Private Const PLAN_SEARCH_BLOCK_LIMIT As Long = 120
 ' ѕредел Long: большее значение CLng не переживЄт (ошибка 6, Overflow).
 Private Const MAX_LONG As Double = 2147483647#
 
+' ѕредел количества в строке столбца D: больше Ч почти наверн€ка опечатка,
+' а расчЄт и чертЄж на таком числе элементов идут часами (ошибка 29).
+Private Const MAX_QTY As Long = 10000
+
 ' –ейки и шкафы.
 Private rCab() As Long
 Private rKind() As String
@@ -221,6 +225,10 @@ Public Sub —оздать онфигуратор()
     Dim usedCnt As Long
     Dim msg As String
     Dim errText As String
+    Dim errNum As Long
+    Dim errCode As Double
+    Dim errLabel As String
+    Dim reserveText As String
 
     gWarn = vbNullString
     gLastDio = 0
@@ -239,6 +247,12 @@ Public Sub —оздать онфигуратор()
     If wsS Is Nothing Then
         MsgBox "ќЎ»Ѕ ј: не найден лист ""Service"".", vbCritical
         Exit Sub
+    End If
+
+    ' D26 и €чейки сигналов (V10/X10/AA10/AC10) Ч формулы, а читаетс€ их
+    ' значение: при ручном режиме вычислений оно могло устареть.
+    If Application.Calculation <> xlCalculationAutomatic Then
+        Application.Calculate
     End If
 
     ' ѕараметры шкафа. D18 Ч „»—Ћќ –≈≈  ¬  ј∆ƒќћ Ў ј‘”.
@@ -276,10 +290,18 @@ Public Sub —оздать онфигуратор()
     End Select
 
     fv = 0
+    reserveText = vbNullString
     v = ws.Range("D19").Value2
 
-    If Not IsError(v) Then
-        If IsNumeric(v) Then fv = CDbl(v)
+    ' “екст (Ђ20 %ї) разбираетс€ „исло»з“екста, как в B18/D18/столбце D, и
+    ' всегда даЄт предупреждение Ч иначе 0 % резерва был бы незаметен.
+    If Not IsError(v) And Not IsEmpty(v) Then
+        If IsNumeric(v) Then
+            fv = CDbl(v)
+        Else
+            reserveText = Trim$(CStr(v))
+            If Len(reserveText) > 0 Then fv = „исло»з“екста(reserveText)
+        End If
     End If
 
     If fv > 1 Then
@@ -294,6 +316,12 @@ Public Sub —оздать онфигуратор()
         gFreeFrac = 0.9
         gWarn = gWarn & vbCrLf & _
             "  Х –езерв D19 ограничен значением 90%."
+    End If
+
+    If Len(reserveText) > 0 Then
+        gWarn = gWarn & vbCrLf & _
+            "  Х D19: резерв записан текстом (""" & reserveText & _
+            """); прин€то " & Format(gFreeFrac, "0%") & "."
     End If
 
     gSeparateMode = ƒа(ws.Range("D13").Value2)
@@ -327,7 +355,8 @@ Public Sub —оздать онфигуратор()
     defRows = Array(27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, _
                     47, 48, 49, 50, 51, 52, 53, 54, 55)
 
-    ' ѕроверка текстовых количеств: одно предупреждение на строку.
+    ' —толбец D до расчЄта: текст Ч одно предупреждение на строку,
+    ' количество больше MAX_QTY Ч ошибка 29 (до любых ReDim).
     For t = LBound(defRows) To UBound(defRows)
         ѕроверитьячейку ол ws, CLng(defRows(t))
     Next t
@@ -852,10 +881,22 @@ Public Sub —оздать онфигуратор()
     Exit Sub
 
 ErrH:
+    errNum = Err.Number
     errText = Err.Description
     Application.ScreenUpdating = True
 
-    MsgBox "ќшибка конфигуратора:" & vbCrLf & vbCrLf & _
+    ' Ќомер N из таблицы ошибок README (vbObjectError + N) Ч пр€мо в окне:
+    ' под обработчиком отладчик на ошибке не останавливаетс€. »наче это
+    ' сбой самого VBA/Excel, и его номер нужен дл€ сообщени€ разработчику.
+    errCode = CDbl(errNum) - CDbl(vbObjectError)
+
+    If errCode >= 1 And errCode <= 999 Then
+        errLabel = "код " & Format(errCode, "0")
+    Else
+        errLabel = "ошибка VBA " & errNum
+    End If
+
+    MsgBox "ќшибка конфигуратора (" & errLabel & "):" & vbCrLf & vbCrLf & _
            errText, vbCritical
 End Sub
 
@@ -3018,7 +3059,9 @@ End Function
 ' —толбец D об€зан содержать число. ≈сли там текст, количество берЄтс€ из
 ' первой группы цифр Ч и об€зательно попадает в предупреждение, чтобы тиха€
 ' подмена (или тихий пропуск строки) не осталась незаметной. „исло, пуста€
-' €чейка, пробелы и ошибка Ч молча; на строку одно сообщение.
+' €чейка, пробелы и ошибка Ч молча; на строку одно сообщение.  оличество
+' больше MAX_QTY (числом или текстом) Ч ошибка 29: опечатка вроде 1000000
+' вместо 10 иначе дала бы Overflow, Out of memory или многочасовой расчЄт.
 Private Sub ѕроверитьячейку ол(ByVal ws As Worksheet, ByVal r As Long)
     Dim v As Variant
     Dim t As String
@@ -3028,12 +3071,20 @@ Private Sub ѕроверитьячейку ол(ByVal ws As Worksheet, ByVal r As Long)
 
     If IsError(v) Then Exit Sub
     If IsEmpty(v) Then Exit Sub
+
+    q = „итать ол(ws, r)
+
+    If q > MAX_QTY Then
+        Err.Raise vbObjectError + 29, , _
+            "—трока " & r & ", столбец " & COL_QTY & ": количество " & _
+            q & " больше предела " & MAX_QTY & " шт. на строку." & _
+            vbCrLf & "ѕроверьте €чейку Ч похоже на опечатку."
+    End If
+
     If IsNumeric(v) Then Exit Sub
 
     t = Trim$(CStr(v))
     If Len(t) = 0 Then Exit Sub
-
-    q = „итать ол(ws, r)
 
     If q > 0 Then
         gWarn = gWarn & vbCrLf & _

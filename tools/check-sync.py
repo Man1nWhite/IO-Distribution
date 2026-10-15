@@ -19,7 +19,10 @@
      фактические результаты parse-spec.py и check-readme-map.py;
   6. вывод каждого `tools/*.py` переживает pipe в cp1252 — так Python пишет
      на Windows в Git Bash, в файл и в CI: без перевода вывода в UTF-8
-     «↔», «−», «—» и кириллица роняют инструмент (UnicodeEncodeError).
+     «↔», «−», «—» и кириллица роняют инструмент (UnicodeEncodeError);
+  7. константы, названные в README как «`ИМЯ` = N» (`MAX_LONG`, `MAX_QTY`,
+     `PLAN_NODE_LIMIT`, …), ↔ их значения в Module1.bas; имя, которого в
+     коде нет, — тоже расхождение (константу переименовали, README забыли).
 
 Что НЕ проверяется: сами правила разбора и укладки (они переносятся по смыслу)
 — только их параметры и обещанные числа.
@@ -117,6 +120,22 @@ def check_numbers():
             check(label, got, "<константа не найдена>")
         else:
             check(label, Decimal(got), Decimal(want))
+
+
+def check_readme_constants():
+    """Числа констант, обещанные README («`ИМЯ` = N»), ↔ Module1.bas."""
+    # Имя с «_» — константа модуля; так не цепляются ячейки (`D18`=4).
+    found = sorted(set(re.findall(
+        r"`([A-Z][A-Z0-9]*_[A-Z0-9_]+)`\s*=\s*([0-9][0-9.]*)", readme())))
+    if not found:
+        check("README называет константы как «`ИМЯ` = N»",
+              "<ни одной>", "<хотя бы одна>")
+        return
+    for name, value in found:
+        got = bas_const(name)
+        check("README: `%s` = %s == Module1.bas" % (name, value),
+              Decimal(got) if got is not None else "<нет такой константы>",
+              Decimal(value))
 
 
 def readme_rows():
@@ -258,7 +277,8 @@ def check_readme_counts():
     """Числа, обещанные README, против фактических результатов инструментов."""
     doc = readme()
 
-    m = re.search(r"(\d+)\s+тестовых вектора", doc)
+    # «34 тестовых вектора» / «36 тестовых векторов» — форма по числу.
+    m = re.search(r"(\d+)\s+тестовых\s+вектор\w*", doc)
     parse_out = tool_output(PARSE_SPEC)
     need = int(m.group(1)) if m else None
     got = re.search(r"векторов:\s*(\d+)", parse_out)
@@ -277,6 +297,8 @@ def main():
     print("== check-sync: зеркала и обещания README ==")
     print("-- константы Module1.bas ↔ tools/*-spec.py")
     check_numbers()
+    print("-- константы, названные в README ↔ Module1.bas")
+    check_readme_constants()
     print("-- таблицы строк и ширин Module1.bas ↔ README")
     check_rows_and_widths()
     print("-- состав проверок README ↔ CI ↔ tools/check-all.py")

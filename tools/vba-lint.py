@@ -98,6 +98,7 @@ msoaligncenter msoalignright msoalignjustify msoanchor msoanchormiddle
 msoanchorbottom msoanchorbottomright msoanchorbottomcenter msoline msolinedash
 msotrue msofalse msoautofit msonormal msoedgeraise3d msofadeclear
 xlnone xlup xldown xltoleft xlportrait xlexcelcurrentlocale
+xlcalculationautomatic xlcalculationmanual xlcalculationsemiautomatic
 """.split())
 
 TYPES = set("""
