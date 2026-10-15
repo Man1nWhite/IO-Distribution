@@ -1,0 +1,17 @@
+#!/bin/sh
+# Локальный хук: tools/vba-lint.py (первый шаг CI) перед каждым коммитом.
+# Установка — один раз из корня: git config core.hooksPath .githooks
+# На Windows — в Git Bash. Полный прогон перед push: python3 tools/check-all.py
+# Код возврата линтера (1 — ошибки E*) блокирует коммит; W* не блокируют.
+set -e
+cd "$(git rev-parse --show-toplevel)"
+if command -v python3 >/dev/null 2>&1; then
+  exec python3 tools/vba-lint.py
+elif command -v python >/dev/null 2>&1; then
+  exec python tools/vba-lint.py
+elif command -v py >/dev/null 2>&1; then
+  exec py tools/vba-lint.py
+else
+  echo "pre-commit: Python не найден — vba-lint пропущен" >&2
+  exit 0
+fi

@@ -18,3 +18,5 @@
 *.md  text eol=lf
 *.sh  text eol=lf
 *.yml text eol=lf
+# Хуки git — шелл-скрипты: CRLF ломает sh («bad interpreter») в Git Bash.
+.githooks/* text eol=lf

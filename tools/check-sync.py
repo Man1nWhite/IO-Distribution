@@ -16,8 +16,9 @@
      `tools/check-all.py --list` (тот же порядок): новый инструмент обязан
      попасть во все три места, иначе он тихо не работает; джоб windows
      запускает `python tools/check-all.py`;
-  5. счётчики, обещанные README («N тестовых вектора», «все N имён»), ↔
-     фактические результаты parse-spec.py и check-readme-map.py;
+  5. счётчики, обещанные README («N тестовых вектора», «все N имён»,
+     «N логических строк»), ↔ фактические результаты parse-spec.py,
+     check-readme-map.py и vba-lint.py;
   6. вывод каждого `tools/*.py` переживает pipe в cp1252 — так Python пишет
      на Windows в Git Bash, в файл и в CI: без перевода вывода в UTF-8
      «↔», «−», «—» и кириллица роняют инструмент (UnicodeEncodeError);
@@ -27,7 +28,13 @@
   8. номера `Err.Raise vbObjectError + N` ↔ таблица «Ошибки» в README, в обе
      стороны: новая ошибка описана, описанная — существует;
   9. векторы самопроверки ТестРазбораЧисел (Module1.bas, гоняется в Excel)
-     ↔ VECTORS / WRAP из tools/parse-spec.py.
+     ↔ VECTORS / WRAP из tools/parse-spec.py;
+ 10. выпуск отложен — README и AGENTS.md не упоминают выпуски (без версий,
+     «релизов»/«тегов» и ссылок compare|releases/tag);
+ 11. локальный хук `.githooks/pre-commit` запускает `tools/vba-lint.py`,
+     а README описывает его установку (`core.hooksPath .githooks`);
+ 12. AGENTS.md — точка входа для агентов: существует, зовёт на
+     `tools/check-all.py` и описывает чтение cp1251 через iconv.
 
 Что НЕ проверяется: сами правила разбора и укладки (они переносятся по смыслу)
 — только их параметры и обещанные числа.
@@ -47,11 +54,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BAS = ROOT / "Module1.bas"
 README = ROOT / "README.md"
+AGENTS = ROOT / "AGENTS.md"
 WORKFLOW = ROOT / ".github" / "workflows" / "vba-lint.yml"
 TOOLS = ROOT / "tools"
 PLAN_SPEC = TOOLS / "plan-spec.py"
 PARSE_SPEC = TOOLS / "parse-spec.py"
 CHECK_ALL = TOOLS / "check-all.py"
+HOOK = ROOT / ".githooks" / "pre-commit"
 SELF = Path(__file__).resolve()
 
 # Признак вложенного запуска: проверка 6 запускает и сам check-sync.py —
@@ -397,6 +406,53 @@ def check_readme_counts():
     check("«все N имён» в README == счётчик check-readme-map.py",
           int(got.group(1)) if got else None, need)
 
+    m = re.search(r"(\d+)\s+логических\s+строк", doc)
+    lint_out = tool_output(TOOLS / "vba-lint.py")
+    need = int(m.group(1)) if m else None
+    got = re.search(r"== Module1\.bas ==.*?\(логических строк (\d+)\)",
+                    lint_out, re.S)
+    check("«N логических строк» в README == счётчик vba-lint.py",
+          int(got.group(1)) if got else None, need)
+
+
+# Выпуск отложен: в README и AGENTS.md не должно быть упоминаний выпусков.
+# Ловятся слова «релиз», «тег» (с начала слова — «категории» не попадает),
+# «tag», SemVer/Keep a Changelog, ссылки releases/tag и compare, версии vN.N.
+RELEASE_MENTION = re.compile(
+    r"(?<![А-Яа-яЁёA-Za-z])релиз\w*"
+    r"|(?<![А-Яа-яЁёA-Za-z])тег\w*"
+    r"|\btag\b|SemVer|keepachangelog|Keep\s+a\s+Changelog"
+    r"|releases/tag|/compare/|v\d+\.\d+", re.I)
+
+
+def check_no_release_mentions():
+    """Выпуск отложен: README и AGENTS.md не упоминают выпуски."""
+    texts = [("README.md", readme())]
+    if AGENTS.is_file():
+        texts.append(("AGENTS.md", AGENTS.read_text(encoding="utf-8")))
+    hits = ["%s: «%s»" % (name, m.group(0))
+            for name, text in texts
+            for m in RELEASE_MENTION.finditer(text)]
+    check("выпуск отложен: README и AGENTS.md без упоминаний выпусков", hits, [])
+
+
+def check_precommit_hook():
+    """Локальный хук ↔ README: vba-lint перед коммитом, установка описана."""
+    hook = HOOK.read_text(encoding="utf-8") if HOOK.is_file() else ""
+    check(".githooks/pre-commit запускает tools/vba-lint.py",
+          "tools/vba-lint.py" in hook, True)
+    check("README описывает установку хука (`core.hooksPath .githooks`)",
+          bool(re.search(r"core\.hooksPath\s+\.githooks", readme())), True)
+
+
+def check_agents_doc():
+    """AGENTS.md — точка входа для агентов: есть и не разошёлся с реальностью."""
+    text = AGENTS.read_text(encoding="utf-8") if AGENTS.is_file() else ""
+    check("AGENTS.md существует и зовёт на tools/check-all.py",
+          bool(text) and "tools/check-all.py" in text, True)
+    check("AGENTS.md описывает чтение Module1.bas в cp1251 через iconv",
+          "iconv" in text and "cp1251" in text, True)
+
 
 def main():
     print("== check-sync: зеркала и обещания README ==")
@@ -416,6 +472,10 @@ def main():
     check_windows_job()
     print("-- счётчики README ↔ результаты инструментов")
     check_readme_counts()
+    print("-- отложенный выпуск, AGENTS.md и локальный хук")
+    check_no_release_mentions()
+    check_agents_doc()
+    check_precommit_hook()
     if not os.environ.get(NESTED_ENV):
         print("-- вывод инструментов в не-UTF-8 pipe (Windows)")
         check_output_encoding()
