@@ -191,4 +191,11 @@ def main():
 
 
 if __name__ == '__main__':
+    # Вывод всегда в UTF-8: на Windows в pipe/файл (Git Bash, «> log», CI)
+    # Python иначе пишет в ANSI-кодировке (cp1251/cp1252) и падает на «↔»,
+    # «−», «—», а в cp1252 и на кириллице (UnicodeEncodeError). Сверяет
+    # tools/check-sync.py запуском с PYTHONIOENCODING=cp1252.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     sys.exit(main())

@@ -19,7 +19,9 @@ python3 tools/check-readme-map.py
 python3 tools/check-sync.py
 ```
 
-Это ровно те же пять шагов, что в CI; одной командой — `./tools/check-all.sh`.
+Это ровно те же пять шагов, что в CI, в том же порядке; одной командой на
+любой ОС — `python3 tools/check-all.py` (Windows: `py tools\check-all.py`;
+`--list` — только перечислить шаги; `./tools/check-all.sh` — обёртка).
 Ожидаемый результат: 0 ошибок и предупреждений линтера; 34 тестовых вектора
 без расхождений; спецификация планировщика (`tools/plan-spec.py`, зеркало
 `TryPlanBlocks`/`SearchBlocks`/`TryPlacePartialSplit` и закрепления связок
@@ -29,9 +31,16 @@ python3 tools/check-sync.py
 вне карты допустимы, их список печатается для аудита); зеркала и обещания
 README сходятся (`tools/check-sync.py`: `PLAN_EPS`, `PLAN_NODE_LIMIT`,
 `PLAN_SEARCH_BLOCK_LIMIT`, `MAX_LONG` против `tools/*-spec.py`, `defRows` и
-`defLensFallback` против таблиц README, состав команд README против шагов CI,
-счётчики 34/45 против фактических). Каталог E01–E18 / W01–W05 — в докстринге
-линтера.
+`defLensFallback` против таблиц README, состав команд README и
+`tools/check-all.py --list` против шагов CI, счётчики 34/45 против
+фактических, вывод каждого `tools/*.py` в pipe с cp1252). Каталог E01–E18 /
+W01–W05 — в докстринге линтера.
+
+Инструменты — Python ≥ 3.7 без внешних зависимостей. Вывод всегда UTF-8, и в
+консоль, и в pipe/файл: иначе на Windows (Git Bash, `> log`, CI) Python пишет в
+cp1251/cp1252 и падает на «↔», «−», «—» с `UnicodeEncodeError`. Новый
+инструмент — то же переключение вывода в UTF-8 (последние строки любого
+`tools/*.py`); за этим следит `check-sync.py`.
 
 CI `.github/workflows/vba-lint.yml` (actions/checkout@v7, setup-python@v7,
 Python 3.12) падает только по ошибкам `E*`; `W*` держат нулём. Кодировка:

@@ -12,10 +12,14 @@
      (tools/plan-spec.py) и `MAX_LONG` (tools/parse-spec.py);
   2. `defRows` (Module1.bas) ↔ набор строк из таблицы «Строки» в README;
   3. `defLensFallback` (Module1.bas) ↔ строка «Запасные ширины» в README;
-  4. команды раздела «Проверки» README ↔ шаги CI: новый инструмент обязан
-     попасть в оба файла, иначе он тихо не работает;
+  4. команды раздела «Проверки» README ↔ шаги CI, и шаги CI ↔
+     `tools/check-all.py --list` (тот же порядок): новый инструмент обязан
+     попасть во все три места, иначе он тихо не работает;
   5. счётчики, обещанные README («N тестовых вектора», «все N имён»), ↔
-     фактические результаты parse-spec.py и check-readme-map.py.
+     фактические результаты parse-spec.py и check-readme-map.py;
+  6. вывод каждого `tools/*.py` переживает pipe в cp1252 — так Python пишет
+     на Windows в Git Bash, в файл и в CI: без перевода вывода в UTF-8
+     «↔», «−», «—» и кириллица роняют инструмент (UnicodeEncodeError).
 
 Что НЕ проверяется: сами правила разбора и укладки (они переносятся по смыслу)
 — только их параметры и обещанные числа.
@@ -34,8 +38,15 @@ ROOT = Path(__file__).resolve().parent.parent
 BAS = ROOT / "Module1.bas"
 README = ROOT / "README.md"
 WORKFLOW = ROOT / ".github" / "workflows" / "vba-lint.yml"
-PLAN_SPEC = ROOT / "tools" / "plan-spec.py"
-PARSE_SPEC = ROOT / "tools" / "parse-spec.py"
+TOOLS = ROOT / "tools"
+PLAN_SPEC = TOOLS / "plan-spec.py"
+PARSE_SPEC = TOOLS / "parse-spec.py"
+CHECK_ALL = TOOLS / "check-all.py"
+SELF = Path(__file__).resolve()
+
+# Признак вложенного запуска: проверка 6 запускает и сам check-sync.py —
+# внутри он пропускает её, иначе рекурсия.
+NESTED_ENV = "CHECK_SYNC_NESTED"
 
 FAILS = []
 CHECKS = 0
@@ -180,6 +191,22 @@ def ci_commands():
     return re.findall(r"(?m)^\s*run:\s*(python3 tools/[\w.-]+\.py)", text)
 
 
+def run_tool(path, args=(), stdout_encoding="utf-8", extra_env=None):
+    """Запустить инструмент; PYTHONIOENCODING задаёт кодировку его вывода.
+
+    Возвращает (код, stdout, stderr). Читается как UTF-8: инструменты сами
+    переводят вывод в UTF-8, какую бы кодировку ни подсунули снаружи.
+    """
+    env = dict(os.environ, PYTHONIOENCODING=stdout_encoding)
+    env.pop(NESTED_ENV, None)
+    env.update(extra_env or {})
+    proc = subprocess.run([sys.executable, str(path)] + list(args),
+                          cwd=str(ROOT), env=env, capture_output=True)
+    return (proc.returncode,
+            proc.stdout.decode("utf-8", errors="replace"),
+            proc.stderr.decode("utf-8", errors="replace"))
+
+
 def check_ci_matches_readme():
     doc = readme_commands()
     ci = ci_commands()
@@ -191,12 +218,40 @@ def check_ci_matches_readme():
           sorted(ci), sorted(doc))
 
 
-def tool_output(args):
-    env = dict(os.environ, PYTHONIOENCODING="utf-8")
-    proc = subprocess.run([sys.executable] + args, cwd=ROOT, env=env,
-                          capture_output=True, text=True, encoding="utf-8",
-                          errors="replace")
-    return (proc.stdout or "") + (proc.stderr or "")
+def check_all_commands():
+    """Шаги tools/check-all.py — как он сам их перечисляет (`--list`)."""
+    code, out, _err = run_tool(CHECK_ALL, ["--list"])
+    if code != 0:
+        return None
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def check_ci_matches_check_all():
+    # got — шаги CI, want — зеркало (check-all.py); порядок важен: «ровно те
+    # же шаги, что в CI», и первый упавший останавливает прогон в обоих.
+    check("шаги tools/check-all.py == шаги CI (тот же порядок)",
+          ci_commands(), check_all_commands())
+
+
+def check_output_encoding():
+    """Каждый tools/*.py переживает stdout в cp1252, как на Windows-pipe."""
+    broken = []
+    for path in sorted(TOOLS.glob("*.py")):
+        # check-all.py без аргументов запустил бы всё, в том числе этот
+        # скрипт; его вывод проверяем на `--list`. Сам check-sync.py
+        # запускается с NESTED_ENV и эту проверку внутри пропускает.
+        args = ["--list"] if path.resolve() == CHECK_ALL.resolve() else []
+        extra = {NESTED_ENV: "1"} if path.resolve() == SELF else None
+        _code, _out, err = run_tool(path, args, "cp1252", extra)
+        if "UnicodeEncodeError" in err:
+            broken.append(path.name)
+    check("вывод tools/*.py в pipe с cp1252 (как на Windows) — "
+          "без UnicodeEncodeError", broken, [])
+
+
+def tool_output(path):
+    _code, out, err = run_tool(path)
+    return out + err
 
 
 def check_readme_counts():
@@ -204,14 +259,14 @@ def check_readme_counts():
     doc = readme()
 
     m = re.search(r"(\d+)\s+тестовых вектора", doc)
-    parse_out = tool_output(["tools/parse-spec.py"])
+    parse_out = tool_output(PARSE_SPEC)
     need = int(m.group(1)) if m else None
     got = re.search(r"векторов:\s*(\d+)", parse_out)
     check("«N тестовых вектора» в README == счётчик parse-spec.py",
           int(got.group(1)) if got else None, need)
 
     m = re.search(r"все\s+(\d+)\s+имён", doc)
-    map_out = tool_output(["tools/check-readme-map.py"])
+    map_out = tool_output(TOOLS / "check-readme-map.py")
     need = int(m.group(1)) if m else None
     got = re.search(r"карта README:\s*(\d+) имён", map_out)
     check("«все N имён» в README == счётчик check-readme-map.py",
@@ -224,10 +279,14 @@ def main():
     check_numbers()
     print("-- таблицы строк и ширин Module1.bas ↔ README")
     check_rows_and_widths()
-    print("-- состав проверок README ↔ CI")
+    print("-- состав проверок README ↔ CI ↔ tools/check-all.py")
     check_ci_matches_readme()
+    check_ci_matches_check_all()
     print("-- счётчики README ↔ результаты инструментов")
     check_readme_counts()
+    if not os.environ.get(NESTED_ENV):
+        print("-- вывод инструментов в не-UTF-8 pipe (Windows)")
+        check_output_encoding()
 
     print("\nпроверок: %d, расхождений: %d" % (CHECKS, len(FAILS)))
     if FAILS:
@@ -238,4 +297,11 @@ def main():
 
 
 if __name__ == "__main__":
+    # Вывод всегда в UTF-8: на Windows в pipe/файл (Git Bash, «> log», CI)
+    # Python иначе пишет в ANSI-кодировке (cp1251/cp1252) и падает на «↔»,
+    # «−», «—», а в cp1252 и на кириллице (UnicodeEncodeError). Сверяет
+    # tools/check-sync.py запуском с PYTHONIOENCODING=cp1252.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     sys.exit(main())
