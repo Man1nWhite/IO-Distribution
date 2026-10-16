@@ -10,6 +10,7 @@ Private Const TYP_DO As Long = 2
 Private Const TYP_DIO32 As Long = 32
 Private Const TYP_DIO64 As Long = 64
 
+Private Const FAM_NONE As Long = 0
 Private Const FAM_TC As Long = 1
 Private Const FAM_AI As Long = 2
 Private Const FAM_DIO As Long = 3
@@ -25,17 +26,31 @@ Private Const FAM_AI_BAR As String = "51,52"
 Private Const FAM_DIO_REL As String = "34,35,36,37"
 Private Const FAM_DIO_BAR As String = "53,54,55"
 
+' ћультиплексоры аналоговых модулей: 47 Ч Hart-мультиплексор, 48 Ч конвертер
+' RS-485/Ethernet. —емейства у них нет: каналы берутс€ из того же общего пула
+' AI/AO, что у барьеров строки 52, а без модулей подключать их не к чему
+' (ошибка 38).
+Private Const ROWS_MUX As String = "47,48"
+
 
 Private Const ROWS_SEPARATE As String = _
     "34,35,36,37,47,48,49,50,51,52,53,54,55"
 
 Private Const RELAY_CH_DEFAULT As Long = 8
 Private Const BAR_CH_DEFAULT As Long = 1
+' ћультиплексор без каналов в Service Ч как Hart-мультиплексор на 8 каналов.
+Private Const MUX_CH_DEFAULT As Long = 8
 
 Private Const ADDR_EXI_DI As String = "V10"
 Private Const ADDR_NAMUR_DI As String = "X10"
 Private Const ADDR_EXI_DO As String = "AA10"
 Private Const ADDR_FREQ_DI As String = "AC10"
+
+' —игналы AI/AO: они заданы только там, где есть мультиплексоры (строки 47-48).
+Private Const ADDR_MUX_P10 As String = "P10"
+Private Const ADDR_MUX_O10 As String = "O10"
+Private Const ADDR_MUX_R10 As String = "R10"
+Private Const ADDR_MUX_S10 As String = "S10"
 
 ' Service: E Ч наименование, F Ч каналы, H Ч ширина.
 Private Const SVC_COL_NAME As Long = 5
@@ -130,6 +145,7 @@ Private mPlaced() As Boolean
 Private mGrpType() As Long
 Private mFam() As Long
 Private mIsBar() As Boolean
+Private mIsMux() As Boolean     ' мультиплексор строк 47-48
 Private mCh() As Long
 Private mBarType() As Long
 Private mBundle() As Long
@@ -165,6 +181,7 @@ Public Sub —оздать онфигуратор()
     Dim fv As Double
     Dim ctrlCount As Long
     Dim total As Long
+    Dim muxQty As Long
     Dim allocN As Long
 
     Dim capAI As Long
@@ -185,6 +202,7 @@ Public Sub —оздать онфигуратор()
     Dim col As Long
     Dim typ As Long
     Dim isBar As Boolean
+    Dim isMux As Boolean
     Dim ch As Long
     Dim barT As Long
     Dim isSep As Boolean
@@ -204,6 +222,7 @@ Public Sub —оздать онфигуратор()
     Dim relayCapDO As Double
     Dim sigDI As Double
     Dim sigDO As Double
+    Dim sigMux As Double
     Dim needKDI As Long
     Dim needKDO As Long
 
@@ -382,6 +401,8 @@ Public Sub —оздать онфигуратор()
         q = „итать ол(ws, r)
         total = total + q
 
+        If Ётоћультиплексор(r) Then muxQty = muxQty + q
+
         If q > 0 Then
             v = ws.Range(COL_NAME & r).Value2
 
@@ -417,6 +438,7 @@ Public Sub —оздать онфигуратор()
     ReDim mGrpType(1 To allocN)
     ReDim mFam(1 To allocN)
     ReDim mIsBar(1 To allocN)
+    ReDim mIsMux(1 To allocN)
     ReDim mCh(1 To allocN)
     ReDim mBarType(1 To allocN)
     ReDim mBundle(1 To allocN)
@@ -457,6 +479,7 @@ Public Sub —оздать онфигуратор()
             typ = ќпределить“ип(r, nm)
             fam = —емейство(r)
             isBar = ЁтоЅарьер(r)
+            isMux = Ётоћультиплексор(r)
 
             ch = 0
             barT = TYP_NONE
@@ -464,6 +487,12 @@ Public Sub —оздать онфигуратор()
             If typ = TYP_DI Or typ = TYP_DO Then
                 ch =  аналы»зService( _
                     wsS, rawNm, RELAY_CH_DEFAULT, r, "реле")
+
+            ElseIf isMux Then
+                ' ћультиплексор занимает каналы того модул€, к которому
+                ' подключЄн, поэтому каналы Ч из Service!F по наименованию.
+                ch =  аналы»зService( _
+                    wsS, rawNm, MUX_CH_DEFAULT, r, "мультиплексор")
 
             ElseIf isBar And fam = FAM_DIO Then
                 ch =  аналы»зService( _
@@ -504,6 +533,7 @@ Public Sub —оздать онфигуратор()
                 mGrpType(idx) = typ
                 mFam(idx) = fam
                 mIsBar(idx) = isBar
+                mIsMux(idx) = isMux
                 mCh(idx) = ch
                 mBarType(idx) = barT
                 mCapAI(idx) = capAI
@@ -556,6 +586,19 @@ Public Sub —оздать онфигуратор()
 
     sigDO = „итать„исло(ws, ADDR_EXI_DO)
     –аспределитьќбщиеЅарьерыDIO sigDO
+
+    ' P10/O10/R10/S10 бывают только там, где мультиплексоры есть: сигналы
+    ' заданы, а строк 47-48 нет Ч почти наверн€ка их забыли в листе Ђ1ї.
+    sigMux = „итать„исло(ws, ADDR_MUX_P10) + _
+             „итать„исло(ws, ADDR_MUX_O10) + _
+             „итать„исло(ws, ADDR_MUX_R10) + _
+             „итать„исло(ws, ADDR_MUX_S10)
+
+    If sigMux > 0 And muxQty = 0 Then
+        gWarn = gWarn & vbCrLf & _
+            "  Х «аданы сигналы AI/AO (P10/O10/R10/S10), " & _
+            "но мультиплексоры (строки 47, 48) не добавлены."
+    End If
 
     If sigDI > 0 Then
         needKDI = -Int(-sigDI / relayChDI)
@@ -741,14 +784,16 @@ Public Sub —оздать онфигуратор()
     Next idx
 
     ' Ё“јѕ 2.2. јналоговые модули и их барьеры: 49-50 -> температурные входы,
-    ' 51 -> только входы AI, 52 -> общий пул AI/AO (он же Ч выходы AO
-    ' температурных модулей). —начала барьеры с ограниченной совместимостью,
-    ' затем единственный общий пул.
+    ' 51 -> только входы AI, мультиплексоры 47-48 и строка 52 -> общий пул
+    ' AI/AO (он же Ч выходы AO температурных модулей). —начала то, что жЄстко
+    ' прив€зано к своим каналам, затем единственный общий пул; MUX идут ƒќ
+    ' строки 52 Ч они занимают каналы модул€ раньше еЄ барьеров.
     If Not gSeparateMode Then
 
-        –аспределитьјналоговыеЅарьеры FAM_TC, DIR_AI
-        –аспределитьјналоговыеЅарьеры FAM_AI, DIR_AI
-        –аспределитьјналоговыеЅарьеры FAM_AI, DIR_AI_AO
+        –аспределитьјналоговыеЅарьеры FAM_TC, DIR_AI, False
+        –аспределитьјналоговыеЅарьеры FAM_AI, DIR_AI, False
+        –аспределитьћультиплексоры
+        –аспределитьјналоговыеЅарьеры FAM_AI, DIR_AI_AO, False
 
         ReDim items(1 To 32)
 
@@ -1504,6 +1549,11 @@ Private Sub –азместитьјналоговую√руппу( _
     For j = 1 To n
         blocks(j) = 1
     Next j
+
+    ' ‘изический пор€док на рейке: модуль -> его мультиплексоры (47-48) ->
+    ' его барьеры. ”кладчику пор€док блоков безразличен, но CommitPlan
+    ' ставит элементы на рейку именно в пор€дке items.
+    ”пор€дочитьјналоговую√руппу items, n
 
     For c = 1 To cabCount
         If ¬идЎкафа(c) = "M" Then
@@ -2295,6 +2345,49 @@ Private Sub —ортировать„астьѕоƒлине( _
     Next i
 End Sub
 
+' ѕор€док элементов аналоговой группы на рейке физический: модуль, затем его
+' мультиплексоры (строки 47-48), затем барьеры. ”кладчик ставит элементы на
+' рейку в пор€дке items (CommitPlan), а пор€док блоков ему безразличен,
+' поэтому перестановка ни на укладку, ни на еЄ стоимость не вли€ет.
+' ѕерестановка устойчива€: сортировка барьеров по ширине сохран€етс€.
+Private Sub ”пор€дочитьјналоговую√руппу( _
+    ByRef items() As Long, ByVal n As Long)
+
+    Dim sorted() As Long
+    Dim j As Long
+    Dim m As Long
+
+    If n < 2 Then Exit Sub
+
+    ReDim sorted(1 To n)
+    m = 0
+
+    For j = 1 To n
+        If Not mIsBar(items(j)) And Not mIsMux(items(j)) Then
+            m = m + 1
+            sorted(m) = items(j)
+        End If
+    Next j
+
+    For j = 1 To n
+        If mIsMux(items(j)) Then
+            m = m + 1
+            sorted(m) = items(j)
+        End If
+    Next j
+
+    For j = 1 To n
+        If mIsBar(items(j)) Then
+            m = m + 1
+            sorted(m) = items(j)
+        End If
+    Next j
+
+    For j = 1 To n
+        items(j) = sorted(j)
+    Next j
+End Sub
+
 Private Function —уммаƒлин( _
     ByRef items() As Long, ByVal n As Long) As Double
 
@@ -2499,11 +2592,17 @@ Private Function —емейство(ByVal r As Long) As Long
     End If
 End Function
 
+' Ѕарьер садитс€ на каналы реле или аналогового модул€ по своему семейству.
+' —троки 47-48 (мультиплексоры) барьерами Ќ≈ €вл€ютс€: семейства у них нет,
+' а каналы они занимают в общем пуле AI/AO наравне со строкой 52.
 Private Function ЁтоЅарьер(ByVal r As Long) As Boolean
-    ЁтоЅарьер = ¬—писке(r, "47,48") Or _
-                ¬—писке(r, FAM_TC_BAR) Or _
+    ЁтоЅарьер = ¬—писке(r, FAM_TC_BAR) Or _
                 ¬—писке(r, FAM_AI_BAR) Or _
                 ¬—писке(r, FAM_DIO_BAR)
+End Function
+
+Private Function Ётоћультиплексор(ByVal r As Long) As Boolean
+    Ётоћультиплексор = ¬—писке(r, ROWS_MUX)
 End Function
 
 Private Function ќпределить“ип( _
@@ -2721,11 +2820,16 @@ Private Function ЌаправлениејналогЅарьера( _
     End If
 End Function
 
-' Ќазначает свободные барьеры семейства fam модул€м этого семейства.
+' Ќазначает свободные элементы модул€м с подход€щими каналами: аналоговые
+' барьеры семейства fam направлени€ dirType, а при muxMode Ч мультиплексоры
+' строк 47-48 (семейства у них нет, пул Ч тот же, что у барьеров строки 52).
 '  ритерий: минимальна€ загрузка (used + ch) / cap после назначени€.
-' ѕри равенстве Ч модуль с меньшим числом барьеров, затем больший.
+' ѕри равенстве Ч модуль с меньшим числом назначенных элементов, затем больший.
+' Ѕарьерам без подход€щих каналов Ч предупреждение (размест€тс€ отдельно),
+' мультиплексорам Ч ошибка 38: подключать их не к чему.
 Private Sub –аспределитьјналоговыеЅарьеры( _
-    ByVal fam As Long, ByVal dirType As Long)
+    ByVal fam As Long, ByVal dirType As Long, _
+    ByVal muxMode As Boolean)
 
     Dim mods() As Long
     Dim bars() As Long
@@ -2754,6 +2858,7 @@ Private Sub –аспределитьјналоговыеЅарьеры( _
     Dim oldAI As Long
     Dim oldCnt As Long
     Dim groupName As String
+    Dim itemsName As String
 
     If gTotalMods <= 0 Then Exit Sub
 
@@ -2763,55 +2868,80 @@ Private Sub –аспределитьјналоговыеЅарьеры( _
     ReDim usedA(1 To gTotalMods)
     ReDim cntA(1 To gTotalMods)
 
-    If dirType = DIR_AI_AO Then
+    If muxMode Then
+        groupName = "ћультиплексоры"
+        itemsName = "мультиплексоров"
+
+    ElseIf dirType = DIR_AI_AO Then
         groupName = "AI/AO"
+        itemsName = "барьеров"
+
     ElseIf fam = FAM_TC Then
         groupName = "TC/RTD"
+        itemsName = "барьеров"
+
     Else
         groupName = "AI, включа€ RTD>AI"
+        itemsName = "барьеров"
     End If
 
+    If muxMode Then
+        '  андидаты Ч мультиплексоры: семейства у них нет, пул тот же,
+        ' что у барьеров строки 52.
+        For i = 1 To gTotalMods
+            If mIsMux(i) And Not mPlaced(i) And Not mSep(i) And _
+               mAnalogOwner(i) = 0 Then
+
+                nBar = nBar + 1
+                bars(nBar) = i
+                totalNeed = totalNeed + mCh(i)
+            End If
+        Next i
+
+    Else
+        For i = 1 To gTotalMods
+            If mIsBar(i) And Not mPlaced(i) And Not mSep(i) And _
+               mFam(i) = fam And mAnDir(i) = dirType And _
+               mAnalogOwner(i) = 0 Then
+
+                nBar = nBar + 1
+                bars(nBar) = i
+                totalNeed = totalNeed + mCh(i)
+            End If
+        Next i
+    End If
+
+    ' ѕул модулей: аналоговые модули со свободными каналами нужного
+    ' направлени€ (мультиплексоры и барьеры строки 52 дел€т один пул).
     For i = 1 To gTotalMods
-        If Not mPlaced(i) And Not mSep(i) Then
+        If Not mPlaced(i) And Not mSep(i) And _
+           Not mIsBar(i) And Not mIsMux(i) Then
 
-            If mIsBar(i) Then
+            curCap = 0
 
-                If mFam(i) = fam And _
-                   mAnDir(i) = dirType And _
-                   mAnalogOwner(i) = 0 Then
+            If dirType = DIR_AI_AO Then
 
-                    nBar = nBar + 1
-                    bars(nBar) = i
-                    totalNeed = totalNeed + mCh(i)
-                End If
+                Select Case mFam(i)
+                    Case FAM_AI
+                        curCap = mCapAI(i) + mCapAO(i)
 
-            Else
-                curCap = 0
+                    Case FAM_TC
+                        ' “емпературные входы зан€ты строками
+                        ' 49-50: общему пулу доступны только
+                        ' выходы AO этого модул€.
+                        curCap = mCapAO(i)
+                End Select
 
-                If dirType = DIR_AI_AO Then
+            ElseIf mFam(i) = fam Then
 
-                    Select Case mFam(i)
-                        Case FAM_AI
-                            curCap = mCapAI(i) + mCapAO(i)
+                curCap = mCapAI(i)
+            End If
 
-                        Case FAM_TC
-                            ' mCapAI здесь означает температурные
-                            ' входы. ќбщему AI/AO-барьеру доступны
-                            ' только выходы AO этого модул€.
-                            curCap = mCapAO(i)
-                    End Select
-
-                ElseIf mFam(i) = fam Then
-
-                    curCap = mCapAI(i)
-                End If
-
-                If curCap > 0 Then
-                    nMod = nMod + 1
-                    mods(nMod) = i
-                    capA(nMod) = curCap
-                    totalCap = totalCap + curCap
-                End If
+            If curCap > 0 Then
+                nMod = nMod + 1
+                mods(nMod) = i
+                capA(nMod) = curCap
+                totalCap = totalCap + curCap
             End If
         End If
     Next i
@@ -2819,16 +2949,26 @@ Private Sub –аспределитьјналоговыеЅарьеры( _
     If nBar = 0 Then Exit Sub
 
     If nMod = 0 Then
-        gWarn = gWarn & vbCrLf & _
-            "  Х " & groupName & _
-            ": у модулей нет подход€щих каналов. " & _
-            "Ѕарьеры (" & nBar & _
-            " шт.) будут размещены отдельно."
+        If muxMode Then
+            ' ћультиплексор без модул€ бесполезен: сигналы AI/AO есть,
+            ' а подключать их не к чему Ч разместить отдельно нельз€.
+            Err.Raise vbObjectError + 38, , _
+                "ћультиплексоры присутствуют, но нет модулей AI/AO " & _
+                "с подход€щими каналами." & vbCrLf & _
+                "ƒобавьте модули строк 28-32 с каналами " & _
+                "или уберите строки 47-48."
+        Else
+            gWarn = gWarn & vbCrLf & _
+                "  Х " & groupName & _
+                ": у модулей нет подход€щих каналов. " & _
+                "Ѕарьеры (" & nBar & _
+                " шт.) будут размещены отдельно."
+        End If
 
         Exit Sub
     End If
 
-    ' ”читываем ранее назначенные барьеры: в общем пуле AI/AO часть входов AI
+    ' ”читываем ранее назначенные элементы: в общем пуле AI/AO часть входов AI
     ' уже зан€та RTD>AI, а температурные барьеры выходы AO температурного
     ' модул€ не занимают. —трока 51 подключаетс€ только ко входам AI,
     ' поэтому еЄ вклад в общий пул ограничен mCapAI: выходы AO остаютс€ свободными,
@@ -2842,7 +2982,9 @@ Private Sub –аспределитьјналоговыеЅарьеры( _
             If mAnalogOwner(i) = mods(k) Then
 
                 If dirType = DIR_AI_AO Then
-                    countOld = (mFam(i) = FAM_AI)
+                    ' ќбщий пул дел€т строка 51 (только входы AI),
+                    ' мультиплексоры 47-48 и барьеры строки 52.
+                    countOld = (mFam(i) = FAM_AI Or mIsMux(i))
                 Else
                     countOld = (mFam(i) = fam And _
                                 mAnDir(i) = dirType)
@@ -2882,7 +3024,7 @@ Private Sub –аспределитьјналоговыеЅарьеры( _
         bars(j + 1) = tmp
     Next i
 
-    ' Ќазначение барьеров: каждый физический барьер Ч ровно одному владельцу.
+    ' Ќазначение элементов: барьер или мультиплексор Ч ровно одному владельцу.
     For i = 1 To nBar
         ch = mCh(bars(i))
         best = 0
@@ -2949,7 +3091,7 @@ Private Sub –аспределитьјналоговыеЅарьеры( _
     If overflow > 0 Then
         gWarn = gWarn & vbCrLf & _
             "  Х " & groupName & _
-            ": учтено барьеров на " & _
+            ": учтено " & itemsName & " на " & _
             Format(totalNeed, "0") & " кан.; " & _
             "Ємкость модулей Ч " & _
             Format(totalCap, "0") & " кан. " & _
@@ -2958,6 +3100,14 @@ Private Sub –аспределитьјналоговыеЅарьеры( _
             "–азмещение выполнено условно; " & _
             "проверьте количество модулей и распределение каналов."
     End If
+End Sub
+
+' ћультиплексоры (строки 47-48) занимают каналы общего пула AI/AO Ч того
+' же, что барьеры строки 52, Ч по тому же критерию минимальной загрузки.
+' ѕроход идЄт ƒќ строки 52 (см. Ё“јѕ 2.2): сначала то, что жЄстко садитс€
+' на свои каналы, потом общий пул.
+Private Sub –аспределитьћультиплексоры()
+    –аспределитьјналоговыеЅарьеры FAM_NONE, DIR_AI_AO, True
 End Sub
 
 Private Function Ќорм»м€Service(ByVal nm As String) As String
