@@ -2,7 +2,7 @@
 
 [![VBA lint](https://github.com/Man1nWhite/IO-Distribution/actions/workflows/vba-lint.yml/badge.svg)](https://github.com/Man1nWhite/IO-Distribution/actions/workflows/vba-lint.yml)
 
-`Module1.bas` (Windows-1251 + CRLF, 3595 логических строк) читает лист «1» (данные) и
+`Module1.bas` (Windows-1251 + CRLF, 3597 логических строк) читает лист «1» (данные) и
 «Service» (справочник), раскладывает железо шкафов АРКС400 (P410, DIO64/DIO32,
 реле KDI/KDO, барьеры, мультиплексоры) по DIN-рейкам и рисует масштабную схему на листе
 «1 расположение». Точка входа — `СоздатьКонфигуратор` (запуск `Alt+F8`),
