@@ -252,6 +252,7 @@ Public Sub СоздатьКонфигуратор()
     Dim reserveText As String
     Dim wasReserveText As Boolean
     Dim reserveClamped As Boolean
+    Dim reserveWasOne As Boolean
 
     gWarn = vbNullString
     gLastDio = 0
@@ -318,9 +319,13 @@ Public Sub СоздатьКонфигуратор()
     ' Число или доля — решает РезервДоля (зеркало в tools/parse-spec.py).
     ' Текст («20 %») разбирается ЧислоИзТекста, как в B18/D18/столбце D, и
     ' всегда даёт предупреждение — иначе 0 % резерва был бы незаметен.
-    gFreeFrac = РезервДоля(v, wasReserveText, reserveClamped)
+    gFreeFrac = РезервДоля(v, wasReserveText, reserveClamped, reserveWasOne)
 
-    If reserveClamped Then
+    If reserveWasOne Then
+        gWarn = gWarn & vbCrLf & _
+            "  • D19 = 1 читается как 100% (доля), резерв ограничен 90%." & _
+            " Для 1% введите число 0,01."
+    ElseIf reserveClamped Then
         gWarn = gWarn & vbCrLf & _
             "  • Резерв D19 ограничен значением 90%."
     End If
@@ -3300,7 +3305,8 @@ End Sub
 ' Выделено из СоздатьКонфигуратор, чтобы правило гонялось векторами в Excel
 ' и в tools/parse-spec.py: поведение здесь намеренно сохранено, а не «исправлено».
 Private Function РезервДоля(ByVal v As Variant, _
-    ByRef wasText As Boolean, ByRef clamped As Boolean) As Double
+    ByRef wasText As Boolean, ByRef clamped As Boolean, _
+    ByRef wasOne As Boolean) As Double
 
     Dim fv As Double
     Dim t As String
@@ -3308,6 +3314,7 @@ Private Function РезервДоля(ByVal v As Variant, _
     fv = 0
     wasText = False
     clamped = False
+    wasOne = False
 
     If Not IsError(v) And Not IsEmpty(v) Then
         If IsNumeric(v) Then
@@ -3331,6 +3338,11 @@ Private Function РезервДоля(ByVal v As Variant, _
         РезервДоля = 0.9
         clamped = True
     End If
+
+    ' Ровно единица — самая частая ошибка ввода: имели в виду 1 %, а по
+    ' правилу D19 это 100 %. Отдельный признак, чтобы предупреждение
+    ' назвало причину, а не только следствие («ограничен 90 %»).
+    wasOne = Abs(fv - 1) < PLAN_EPS
 End Function
 
 Private Function ЧитатьЧисло( _
@@ -3613,19 +3625,21 @@ Private Sub ТестРазбораЧисел()
     ТестКоличества "1_000", 1, n, bad
     ТестКоличества "99999999999", MAX_LONG, n, bad
 
-    ' РезервДоля: правило D19. «1» и «1 %» — 100 %, а не 1 %.
-    ТестРезерва "1", 0.9, n, bad
-    ТестРезерва "0", 0, n, bad
-    ТестРезерва "20", 0.2, n, bad
-    ТестРезерва "90", 0.9, n, bad
-    ТестРезерва "91", 0.9, n, bad
-    ТестРезерва "100", 0.9, n, bad
-    ТестРезерва "150", 0.9, n, bad
-    ТестРезерва "-5", 0, n, bad
-    ТестРезерва "1 %", 0.9, n, bad
-    ТестРезерва "20 %", 0.2, n, bad
-    ТестРезерва "нет", 0, n, bad
-    ТестРезерва "", 0, n, bad
+    ' РезервДоля: правило D19 — доля и три признака (текст, ограничен,
+    ' единица). «1» и «1 %» — 100 %, а не 1 %. Порядок: доля, текст,
+    ' ограничен, единица.
+    ТестРезерва "1", 0.9, False, True, True, n, bad
+    ТестРезерва "0", 0, False, False, False, n, bad
+    ТестРезерва "20", 0.2, False, False, False, n, bad
+    ТестРезерва "90", 0.9, False, True, False, n, bad
+    ТестРезерва "91", 0.9, False, True, False, n, bad
+    ТестРезерва "100", 0.9, False, True, False, n, bad
+    ТестРезерва "150", 0.9, False, True, False, n, bad
+    ТестРезерва "-5", 0, False, False, False, n, bad
+    ТестРезерва "1 %", 0.9, True, True, True, n, bad
+    ТестРезерва "20 %", 0.2, True, False, False, n, bad
+    ТестРезерва "нет", 0, True, False, False, n, bad
+    ТестРезерва "", 0, False, False, False, n, bad
 
     If Len(bad) = 0 Then
         MsgBox "Разбор чисел: " & n & " векторов, расхождений нет.", _
@@ -3671,10 +3685,6 @@ Private Sub ТестЦелого(ByVal s As String, ByVal want As Double, _
     End If
 End Sub
 
-'=============================================================================
-' ОТРИСОВКА
-'=============================================================================
-
 Private Sub ТестКоличества(ByVal s As String, ByVal want As Double, _
                            ByRef n As Long, ByRef bad As String)
     Dim got As Long
@@ -3689,20 +3699,35 @@ Private Sub ТестКоличества(ByVal s As String, ByVal want As Double, _
 End Sub
 
 Private Sub ТестРезерва(ByVal s As String, ByVal want As Double, _
+                        ByVal wantText As Boolean, _
+                        ByVal wantClamped As Boolean, _
+                        ByVal wantOne As Boolean, _
                         ByRef n As Long, ByRef bad As String)
     Dim got As Double
     Dim wasText As Boolean
     Dim clamped As Boolean
+    Dim wasOne As Boolean
 
     n = n + 1
-    got = РезервДоля(s, wasText, clamped)
+    got = РезервДоля(s, wasText, clamped, wasOne)
 
     If Abs(got - want) > 0.000000001 Then
         bad = bad & vbCrLf & "  РезервДоля(""" & s & """) = " & got & _
               ", ожидалось " & want
     End If
+
+    If wasText <> wantText Or clamped <> wantClamped Or wasOne <> wantOne Then
+        bad = bad & vbCrLf & "  РезервДоля(""" & s & """) признаки: текст=" & _
+              wasText & ", ограничен=" & clamped & ", единица=" & wasOne & _
+              "; ожидалось текст=" & wantText & ", ограничен=" & wantClamped & _
+              ", единица=" & wantOne
+    End If
 End Sub
 
+'=============================================================================
+' ОТРИСОВКА
+'=============================================================================
+
 Private Sub НарисоватьРасположение( _
     ByVal wl As Worksheet, _
     ByRef legName() As String, ByRef legLen() As Double, _

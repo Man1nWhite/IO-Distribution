@@ -134,6 +134,7 @@ def check_numbers():
         ("PLAN_NODE_LIMIT", PLAN_SPEC, "NODE_LIMIT"),
         ("PLAN_SEARCH_BLOCK_LIMIT", PLAN_SPEC, "SEARCH_BLOCK_LIMIT"),
         ("MAX_LONG", PARSE_SPEC, "MAX_LONG"),
+        ("PLAN_EPS", PARSE_SPEC, "PLAN_EPS"),
     ]
     for bas_name, mirror, mirror_name in pairs:
         got = bas_const(bas_name)
@@ -276,8 +277,16 @@ def check_error_codes():
 # Строковое выражение VBA из литералов и ChrW(N): "1" & ChrW(160) & "500".
 VBA_STR = r'(?:"(?:[^"]|"")*"|ChrW\$?\(\d+\))'
 VBA_TEST_CALL = re.compile(
-    r"(?m)^\s*(ТестЧисла|ТестЦелого|ТестКоличества|ТестРезерва)\s+(%s(?:\s*&\s*%s)*)\s*,"
+    r"(?m)^\s*(ТестЧисла|ТестЦелого|ТестКоличества)\s+(%s(?:\s*&\s*%s)*)\s*,"
     r"\s*(-?MAX_LONG|-?\d+(?:\.\d+)?)\s*,\s*n\s*,\s*bad\s*$"
+    % (VBA_STR, VBA_STR))
+
+# РезервДоля сверяет и три признака — по ним выбирается предупреждение,
+# которое видит пользователь, поэтому они часть контракта, а не деталь.
+VBA_REZERV_CALL = re.compile(
+    r"(?m)^\s*ТестРезерва\s+(%s(?:\s*&\s*%s)*)\s*,"
+    r"\s*(-?\d+(?:\.\d+)?)\s*,\s*(True|False)\s*,\s*(True|False)\s*,"
+    r"\s*(True|False)\s*,\s*n\s*,\s*bad\s*$"
     % (VBA_STR, VBA_STR))
 
 
@@ -296,12 +305,16 @@ def check_parse_vectors():
     py = {"ТестЧисла": Counter((s, float(w)) for s, w in spec["VECTORS"]),
           "ТестЦелого": Counter((s, float(w)) for s, w in spec["WRAP"]),
           "ТестКоличества": Counter((s, float(w)) for s, w in spec["KOL"]),
-          "ТестРезерва": Counter((s, float(w)) for s, w in spec["REZERV"])}
+          "ТестРезерва": Counter((s, float(w), wt, wc, wo)
+                                 for s, w, wt, wc, wo in spec["REZERV"])}
     vba = {"ТестЧисла": Counter(), "ТестЦелого": Counter(),
            "ТестКоличества": Counter(), "ТестРезерва": Counter()}
     for kind, expr, num in VBA_TEST_CALL.findall(bas_text()):
         want = {"MAX_LONG": top, "-MAX_LONG": -top}.get(num)
         vba[kind][(vba_string(expr), float(num if want is None else want))] += 1
+    for expr, num, wt, wc, wo in VBA_REZERV_CALL.findall(bas_text()):
+        vba["ТестРезерва"][(vba_string(expr), float(num),
+                            wt == "True", wc == "True", wo == "True")] += 1
     for kind, func, table in (("ТестЧисла", "ЧислоИзТекста", "VECTORS"),
                               ("ТестЦелого", "ИзвлечьЧисло", "WRAP"),
                               ("ТестКоличества", "КолИзЗначения", "KOL"),
