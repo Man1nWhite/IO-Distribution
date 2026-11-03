@@ -2008,46 +2008,52 @@ Private Function TryPlacePartialSplit( _
 
             done(best) = True
 
-            ' ¬ариант блоков: раздробленные Ч по элементам, остальные целиком.
-            nextId = 0
+            ' ‘аза 2, шаг 1 Ч тот же вариант, что шаг 1 фазы 1 (раздроблен
+            ' только самый широкий блок). ѕовтор ничего не даЄт, но тратит
+            ' сквозной бюджет узлов: на трудной группе это лишние узлы
+            ' вплоть до ошибки 44/46. ‘аза 2 начинаетс€ со второго блока.
+            If phase = 1 Or nTry > 1 Then
+                ' ¬ариант блоков: раздробленные Ч по элементам, остальные целиком.
+                nextId = 0
 
-            For blk = 1 To nBlk
-                blkMap(blk) = 0
+                For blk = 1 To nBlk
+                    blkMap(blk) = 0
 
-                If blkCnt(blk) > 0 And Not done(blk) Then
-                    nextId = nextId + 1
-                    blkMap(blk) = nextId
+                    If blkCnt(blk) > 0 And Not done(blk) Then
+                        nextId = nextId + 1
+                        blkMap(blk) = nextId
+                    End If
+                Next blk
+
+                ReDim part(1 To n)
+                partN = nextId
+
+                For j = 1 To n
+                    If done(blocks(j)) Then
+                        partN = partN + 1
+                        part(j) = partN
+                    Else
+                        part(j) = blkMap(blocks(j))
+                    End If
+                Next j
+
+                ' ÷елых блоков не осталось Ч это штатный фоллбэк вызывающего.
+                If partN >= n Then Exit For
+
+                If TryPlanBlocks( _
+                    cabId, kind, items, part, n, partN, _
+                    plan, localLimit, nodes) Then
+
+                    CommitPlan items, part, n, plan, railsUsed
+                    TryPlacePartialSplit = True
+                    Exit Function
                 End If
-            Next blk
 
-            ReDim part(1 To n)
-            partN = nextId
-
-            For j = 1 To n
-                If done(blocks(j)) Then
-                    partN = partN + 1
-                    part(j) = partN
-                Else
-                    part(j) = blkMap(blocks(j))
+                ' ѕредел поиска уже достигнут: следующие варианты дороже.
+                If localLimit Then
+                    hitLimit = True
+                    Exit Function
                 End If
-            Next j
-
-            ' ÷елых блоков не осталось Ч это штатный фоллбэк вызывающего.
-            If partN >= n Then Exit For
-
-            If TryPlanBlocks( _
-                cabId, kind, items, part, n, partN, _
-                plan, localLimit, nodes) Then
-
-                CommitPlan items, part, n, plan, railsUsed
-                TryPlacePartialSplit = True
-                Exit Function
-            End If
-
-            ' ѕредел поиска уже достигнут: следующие варианты только дороже.
-            If localLimit Then
-                hitLimit = True
-                Exit Function
             End If
         Next nTry
     Next phase

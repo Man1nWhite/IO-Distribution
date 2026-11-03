@@ -5,7 +5,8 @@
 Зеркало планировщика из `Module1.bas`: `TryPlanBlocks`, `SearchBlocks`
 (включая отсечение симметрии одинаковых по ширине блоков и дедупликацию
 реек с равным свободным местом), `TryPlaceGroupInCab`,
-`TryPlacePartialSplit` (фазы 1 и 2), `CommitPlan` и
+`TryPlacePartialSplit` (фазы 1 и 2; фаза 2 начинает со второго блока — её
+первый вариант повторял бы первый вариант фазы 1), `CommitPlan` и
 `РазместитьСвязкуНаСвободнойРейке` (этап 1.1, шкаф P410). Порядок обхода,
 сортировка блоков по убыванию и выбор реек повторяют VBA; размещение
 фиксируется только после успешной укладки всей группы (как `CommitPlan`),
@@ -40,12 +41,19 @@ SEARCH_BLOCK_LIMIT = 120  # PLAN_SEARCH_BLOCK_LIMIT
 
 
 class Budget:
-    """Сквозной счётчик узлов перебора на одну попытку группы."""
+    """Сквозной счётчик узлов перебора на одну попытку группы.
+
+    search_calls / plan_calls / variants — инструменты проверки, а не
+    состояние VBA: по ним видно, сколько поисков потрачено и не пробовался
+    ли один и тот же набор блоков дважды.
+    """
 
     def __init__(self, limit=NODE_LIMIT):
         self.limit = limit
         self.nodes = 0
         self.search_calls = 0
+        self.plan_calls = 0
+        self.variants = []
 
 
 class Rails:
@@ -115,6 +123,8 @@ def search_blocks(level, n_blk, order, blk_len, rail_ids, free_cap,
 
 def try_plan_blocks(rails, lens, cab_id, kind, items, blocks, budget):
     """(plan|None, hit_limit). items/blocks — параллельные списки элементов."""
+    budget.plan_calls += 1
+    budget.variants.append(tuple(blocks))
     n_blk = max(blocks) + 1 if blocks else 0
     blk_len = [0.0] * n_blk
     total = 0.0
@@ -197,7 +207,7 @@ def try_place_partial_split(rails, lens, placed_rail, cab_id, kind,
     for phase in (1, 2):
         done = [False] * n_blk
         tried = [False] * n_blk
-        for _ in range(n_blk):
+        for n_try in range(n_blk):
             best = -1
             for blk in range(n_blk):
                 if blk_cnt[blk] > 1 and not tried[blk]:
@@ -209,6 +219,12 @@ def try_place_partial_split(rails, lens, placed_rail, cab_id, kind,
             if phase == 1:
                 done = [False] * n_blk
             done[best] = True
+
+            # Фаза 2, шаг 1 — тот же вариант, что шаг 1 фазы 1 (раздроблен
+            # только самый широкий блок). Повтор тратит сквозной бюджет
+            # узлов, не меняя исход: фаза 2 начинается со второго блока.
+            if phase == 2 and n_try == 0:
+                continue
 
             blk_map = {}
             nxt = 0
@@ -444,6 +460,52 @@ def scenario_tight_cabinet():
     check("Тесный шкаф: состояние не изменено", rails2.snapshot() == before)
 
 
+def scenario_phase2_no_repeat():
+    """Фаза 2 не повторяет первый вариант фазы 1.
+
+    Блоки 110 (70+40), 80 (50+30) и 10 на двух рейках по 100: целыми не
+    встают, фаза 1 дробит по очереди каждый составной блок, фаза 2 раньше
+    начиналась с того же самого широкого блока — тот же набор, тот же
+    отказ, но узлы сквозного бюджета потрачены. Итог укладки при этом не
+    менялся: группу кладёт фоллбэк на отдельные элементы.
+    """
+    rails = Rails([(1, "M", 100), (1, "M", 100)])
+    lens = [70.0, 40.0, 50.0, 30.0, 10.0]
+    items, blocks = list(range(5)), [0, 0, 1, 1, 2]
+    placed, budget = {}, Budget()
+    res = try_place_group_in_cab(rails, lens, placed, 1, "M", items, blocks,
+                                 budget=budget)
+    check("Фаза 2: группа размещена", res["ok"])
+    dup = len(budget.variants) - len(set(budget.variants))
+    check("Фаза 2: один и тот же набор блоков не пробуется дважды", dup == 0,
+          f"повторов {dup}: {budget.variants}")
+    probs = check_invariants("Фаза 2", rails, lens, placed, [(items, 1)])
+    check("Фаза 2: инварианты", not probs, "; ".join(probs))
+    print(f"     (вызовов TryPlanBlocks {budget.plan_calls}, "
+          f"узлов {budget.nodes})")
+
+
+def scenario_budget_not_wasted():
+    """Повтор фазы 2 не превращает решаемую задачу в ошибку 44/46.
+
+    Задача с урезанным бюджетом (60 узлов): укладка существует, и её хватает
+    бюджета — но прежде фаза 2 первым делом повторяла вариант фазы 1, поиск
+    упирался в лимит, и вызывающий получал hitLimit («предел поиска»,
+    ошибки 44/46) вместо укладки.
+    """
+    rails = Rails([(1, "M", 120), (1, "M", 120), (1, "M", 160), (1, "M", 200)])
+    lens = [35.0, 67.0, 100.0, 100.0, 23.0, 67.0, 13.0, 100.0, 67.0]
+    items, blocks = list(range(9)), [0, 0, 0, 1, 1, 2, 2, 3, 3]
+    placed, budget = {}, Budget(limit=60)
+    res = try_place_group_in_cab(rails, lens, placed, 1, "M", items, blocks,
+                                 budget=budget)
+    check("Бюджет не растрачен: решаемая задача уложена", res["ok"],
+          f"узлов {budget.nodes} из {budget.limit}")
+    check("Бюджет не растрачен: предел поиска не взведён", not res["hit_limit"])
+    probs = check_invariants("Бюджет 60", rails, lens, placed, [(items, 1)])
+    check("Бюджет не растрачен: инварианты", not probs, "; ".join(probs))
+
+
 def scenario_shared_budget():
     """Сквозной бюджет: суммарно узлов не больше лимита + по одному
     «лишнему» узлу на вызов SearchBlocks, а hit_limit взведён."""
@@ -559,6 +621,8 @@ def main():
     scenario_dio_seven_of_eight()
     scenario_bundle_wider_than_rail()
     scenario_tight_cabinet()
+    scenario_phase2_no_repeat()
+    scenario_budget_not_wasted()
     scenario_shared_budget()
     randomized()
     # Второй прогон: настоящие ширины модулей и барьеров (defLensFallback),
