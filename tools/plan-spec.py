@@ -362,10 +362,16 @@ def check(name, cond, detail=""):
         FAIL.append(name)
 
 
-def intact_bundles(blocks, items, placed_rail):
-    """Сколько блоков лежат целиком на одной рейке."""
+def intact_bundles(blocks, items, placed_rail, skip=()):
+    """Сколько блоков лежат целиком на одной рейке (кроме блоков из skip).
+
+    skip — блоки, которые не считаются связками: в сценарии DIO блок 0 —
+    сам модуль DIO, он всегда целый и в счёт «7 из 8 связок» не входит.
+    """
     by_block = {}
     for idx, blk in zip(items, blocks):
+        if blk in skip:
+            continue
         by_block.setdefault(blk, set()).add(placed_rail[idx])
     return sum(1 for rs in by_block.values() if len(rs) == 1)
 
@@ -413,10 +419,7 @@ def scenario_dio_seven_of_eight():
     check("DIO 7/8: неудача не меняет состояние", rails.snapshot() == before)
     res = try_place_group_in_cab(rails, lens, placed, 1, "M", items, blocks)
     check("DIO 7/8: группа размещена с дроблением", res["ok"] and res["was_split"])
-    bundle_blocks = {b for b in blocks if b > 0}
-    intact_b = sum(1 for b in bundle_blocks
-                   if len({placed[i] for i, bb in zip(items, blocks)
-                           if bb == b}) == 1)
+    intact_b = intact_bundles(blocks, items, placed, skip={0})
     check("DIO 7/8: целы 7 из 8 связок", intact_b == 7, f"целы {intact_b}")
     probs = check_invariants("DIO", rails, lens, placed, [(items, 1)])
     check("DIO 7/8: инварианты", not probs, "; ".join(probs))
