@@ -41,6 +41,8 @@ vba-lint.py — статическая проверка VBA-модуля (Module
       (VBA: Argument not optional / Wrong number of arguments)
   E22 именованный аргумент, которого нет в сигнатуре процедуры модуля
       (VBA: Named argument not found)
+  E23 тип в «As <Тип>» не известен — ни встроенный, ни объектный, ни
+      объявленный в модуле (VBA: User-defined type not defined)
 
 Предупреждения (код возврата не меняют):
   W01 табуляция вместо пробелов
@@ -48,6 +50,8 @@ vba-lint.py — статическая проверка VBA-модуля (Module
   W03 строка длиннее MAX_LINE
   W04 неиспользуемый параметр/локальная переменная
   W05 метка, на которую нет переходов
+  W06 Private-объявление уровня модуля нигде не используется (Public/Friend
+      может использовать другой модуль проекта — не проверяется)
 
 Использование:
     python3 tools/vba-lint.py [файл.bas ...]
@@ -259,19 +263,45 @@ def parse_procedures(logical):
     return procs, module
 
 
-def collect_decls(procs, module):
-    """Имена, объявленные на уровне модуля."""
-    mod_names = set()
-    for no, text, _ in module:
-        low = text.lower()
-        m = re.match(
-            r"^\s*(private|public|friend)\s+(?:const|dim|static)?\s*(?:withevents\s+)?"
-            r"(%s)" % NAME_RE,
-            low,
-        )
+def module_level(module):
+    """Уровень модуля: объявления, имена Type/Enum и члены Enum.
+
+    Возвращает ({имя: (строка, видимость, имя как записано)}, типы,
+    члены_enum). Внутри
+    Type/Enum объявления — поля и члены, а не переменные модуля: поле
+    доступно только через точку, член Enum — по имени (иначе E08 считал бы
+    его необъявленным).
+    """
+    names, types, members = {}, set(), set()
+    inside = None
+    for no, text, _span in module:
+        low = text.strip().lower()
+        m = re.match(r"^(?:public\s+|private\s+)?(type|enum)\s+(%s)" % NAME_RE, low)
         if m:
-            mod_names.add(m.group(2))
-    return mod_names
+            inside = m.group(1)
+            types.add(m.group(2))
+            continue
+        if re.match(r"^end (type|enum)\b", low):
+            inside = None
+            continue
+        if inside == "enum":
+            m = re.match(r"^(%s)\s*(?:=|$)" % NAME_RE, low)
+            if m:
+                members.add(m.group(1))
+            continue
+        if inside:
+            continue
+        m = re.match(
+            r"^(private|public|friend)\s+(?:const\s+|dim\s+|static\s+)?"
+            r"(?:withevents\s+)?(%s)" % NAME_RE, text.strip(), re.I)
+        if m:
+            names[m.group(2).lower()] = (no, m.group(1).lower(), m.group(2))
+    return names, types, members
+
+
+def collect_decls(procs, module):
+    """Имена, объявленные на уровне модуля (без полей Type и членов Enum)."""
+    return set(module_level(module)[0])
 
 
 def declared_in_proc(proc):
@@ -506,9 +536,11 @@ def check_file(path):
     for d in dups:
         err("E07", 0, "дублирующееся имя процедуры: %s" % d)
 
-    mod_names = collect_decls(procs, module)
+    mod_decls, mod_types, enum_members = module_level(module)
+    mod_names = set(mod_decls)
     proc_names = {p["name"].lower() for p in procs}
-    known = KEYWORDS | BUILTINS | CONSTANTS | TYPES | mod_names | proc_names
+    known = (KEYWORDS | BUILTINS | CONSTANTS | TYPES | mod_names | proc_names
+             | mod_types | enum_members)
     signatures = {p["name"].lower(): proc_signature(p) for p in procs}
     proc_label = {p["name"].lower(): p["name"] for p in procs}
 
@@ -737,6 +769,40 @@ def check_file(path):
                 continue
             err("E16", i, "код внутри процедуры на нулевом отступе: %s" % s[:60])
 
+    # E23 — тип в «As <Тип>» обязан быть известен: встроенный, объектный или
+    # объявленный в этом модуле (Type/Enum). E08 такие имена не видит — он
+    # вырезает «As …» целиком, — а опечатка в типе это ошибка компиляции VBA
+    # («User-defined type not defined»). Класс из другого модуля проекта
+    # добавляется в TYPES тем же коммитом (см. докстринг).
+    known_types = TYPES | BUILTINS | mod_types
+    scans = [("<уровень модуля>", [(no, t) for no, t, _span in module])]
+    for p in procs:
+        scans.append((p["name"],
+                      [(p["start"], p["sig"])]
+                      + [(no, t) for no, t, _span in p["body"]]))
+    for label, lines in scans:
+        for no, text in lines:
+            for m in re.finditer(r"\bas\s+(?:new\s+)?(%s)" % NAME_RE,
+                                 mask_strings(text), re.I):
+                if m.group(1).lower() not in known_types:
+                    err("E23", no, "%s: тип «%s» не известен" % (label, m.group(1)))
+
+    # W06 — неиспользуемые объявления уровня модуля. Только Private:
+    # Public/Friend может использовать другой модуль проекта, отсюда этого
+    # не видно. Использование в инициализаторе другой константы считается.
+    bodies_text = "\n".join(mask_strings(t).lower()
+                            for p in procs for _, t, _span in p["body"])
+    mod_lines = [(no, mask_strings(t).lower()) for no, t, _span in module]
+    for nm, (no, visibility, label) in sorted(mod_decls.items()):
+        if visibility != "private" or nm in TYPES:
+            continue
+        pat = r"(?<![\.\w])%s(?![\w])" % re.escape(nm)
+        uses = len(re.findall(pat, bodies_text))
+        uses += sum(len(re.findall(pat, t)) for mno, t in mod_lines if mno != no)
+        if uses == 0:
+            warn("W06", no,
+                 "«%s» объявлен на уровне модуля и не используется" % label)
+
     # W04 — неиспользуемые параметры/локали. Строка объявления — не
     # использование: иначе всякий Dim сам себе оправдание и правило молчит.
     for p in procs:
@@ -939,6 +1005,55 @@ SELFTEST = [
      "Private Sub Дело()\n"
      "    MsgBox \"x\"\n"
      "End Sub\n", {"E03"}, set()),
+    ("E23: опечатка в типе («As Longn»)",
+     "Private Sub Дело()\n"
+     "    Dim x As Longn\n"
+     "    x = 1\n"
+     "End Sub\n", {"E23"}, set()),
+    ("E23: опечатка в типе после New",
+     "Private Sub Дело()\n"
+     "    Dim c As New Collectionn\n"
+     "    c.Add 1\n"
+     "End Sub\n", {"E23"}, set()),
+    ("E23: опечатка в типе параметра",
+     "Private Sub Дело(ByVal ws As Workheet)\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", {"E23"}, set()),
+    ("E23: известные типы, массив и Type/Enum модуля — молчит",
+     "Private Type Точка\n"
+     "    x As Long\n"
+     "End Type\n\n"
+     "Private Enum Цвет\n"
+     "    Красный = 1\n"
+     "End Enum\n\n"
+     "Private Sub Дело(ByVal ws As Worksheet)\n"
+     "    Dim a() As Long\n"
+     "    Dim p As Точка\n"
+     "    Dim c As Цвет\n"
+     "    Dim o As New Collection\n"
+     "    c = Красный\n"
+     "    p.x = 1\n"
+     "    o.Add p.x\n"
+     "    ReDim a(1 To 2)\n"
+     "    a(1) = c\n"
+     "    MsgBox ws.Name\n"
+     "End Sub\n", set(), {"E23", "E08"}),
+    ("W06: Private-константа уровня модуля не используется",
+     "Private Const ЛИШНЯЯ As Long = 5\n\n"
+     "Private Sub Дело()\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", {"W06"}, set()),
+    ("W06: используется в инициализаторе другой константы — молчит",
+     "Private Const БАЗА As Long = 5\n"
+     "Private Const ПРОИЗВ As Long = БАЗА * 2\n\n"
+     "Private Sub Дело()\n"
+     "    MsgBox ПРОИЗВ\n"
+     "End Sub\n", set(), {"W06"}),
+    ("W06: Public виден другим модулям проекта — не проверяется",
+     "Public gВнешняя As Long\n\n"
+     "Private Sub Дело()\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", set(), {"W06"}),
     ("E03: закрытые Type и Enum на уровне модуля",
      "Private Type Точка\n"
      "    x As Long\n"
