@@ -168,10 +168,44 @@ def norm_service(name):
     return name.replace("\u00a0", " ").strip(" ").upper()
 
 
+def bas_text():
+    return BAS.read_bytes().decode("cp1251")
+
+
 def def_rows():
-    text = BAS.read_bytes().decode("cp1251")
-    m = re.search(r"(?ms)^\s*defRows = Array\((.*?)\)", text)
+    m = re.search(r"(?ms)^\s*defRows = Array\((.*?)\)", bas_text())
     return [int(x) for x in re.findall(r"\d+", m.group(1))] if m else []
+
+
+def bas_rows(const_name):
+    """Номера строк из константы вида Private Const FAM_… As String = "28,29"."""
+    m = re.search(r'(?m)^Private Const %s As String = "([\d,]+)"'
+                  % re.escape(const_name), bas_text())
+    return {int(x) for x in m.group(1).split(",")} if m else set()
+
+
+def bas_number(const_name):
+    m = re.search(r"(?m)^Private Const %s As \w+ = ([0-9][0-9.]*)#?"
+                  % re.escape(const_name), bas_text())
+    return float(m.group(1)) if m else None
+
+
+def norm_category(s):
+    """НормКатегория: НормИмяService плюс схлопывание двойных пробелов."""
+    return " ".join(norm_service(s).split())
+
+
+def channels_of(value):
+    """Каналы из Service!F, как их читает макрос: целое в диапазоне Long.
+
+    None — ячейка не годится (ошибка, пусто, текст, дробь, вне диапазона);
+    такую строку КаналыИзService/КаналыПоКатегории пропускают и ищут дальше.
+    """
+    n = as_number(value)
+    limit = bas_number("MAX_LONG")
+    if n is None or n != int(n) or limit is None or n > limit:
+        return None
+    return int(n)
 
 
 def readme_example_values():
@@ -254,6 +288,87 @@ def check_names_in_service(data, rows):
               "добавьте наименование или ширину в Service")
 
 
+def check_channels(data, svc):
+    """Каналы Service!F для используемых наименований — как их читает макрос.
+
+    README обещает прогон примера без блока «ВНИМАНИЕ», а предупреждение
+    даёт не только отсутствующая ширина, но и отсутствующие каналы:
+    КаналыИзService (реле, барьеры, мультиплексоры) требует целое > 0,
+    КаналыПоКатегории (модули 28–32) — целое ≥ 0 в своей категории, и
+    предупреждает, только если нет ни AI, ни AO. Проверка ширины этого не
+    покрывала: книга могла разойтись с обещанием незаметно.
+
+    Берётся ПЕРВАЯ годная строка — как в макросе. Прочие строки с тем же
+    наименованием и категорией, но другим F, печатаются справочно: в
+    справочнике это режимы модуля («0-10 В поддержан не…»), и макрос их
+    молча игнорирует, поэтому перестановка строк Service меняет ёмкость.
+    """
+    by_name = (bas_rows("FAM_DIO_REL") | bas_rows("ROWS_MUX")
+               | bas_rows("FAM_DIO_BAR") | bas_rows("FAM_TC_BAR")
+               | bas_rows("FAM_AI_BAR"))
+    analog_mod = bas_rows("FAM_TC_MOD") | bas_rows("FAM_AI_MOD")
+    cat_ai = norm_category("module AI")
+    cat_ao = norm_category("module AO")
+    # (ключ, категория) → [(строка, каналы)] в порядке строк Service.
+    index = {}
+    for ref, value in svc.items():
+        col, row = re.match(r"([A-Z]+)(\d+)$", ref).groups()
+        if col != SVC_NAME or isinstance(value, XlError):
+            continue
+        key = norm_service(as_text(value))
+        if not key:
+            continue
+        cat = norm_category(as_text(svc.get("D" + row) or ""))
+        index.setdefault((key, cat), []).append(
+            (int(row), channels_of(svc.get("F" + row))))
+
+    def first_valid(entries, minimum):
+        return next(((r, ch) for r, ch in sorted(entries)
+                     if ch is not None and ch >= minimum), (None, None))
+
+    for r in def_rows():
+        qty = as_number(data.get(COL_QTY + str(r)))
+        if isinstance(data.get(COL_QTY + str(r)), XlError):
+            continue
+        if qty is None or int(qty) <= 0:
+            continue
+        name = as_text(data.get(COL_NAME + str(r))).strip()
+        key = norm_service(name)
+        if r in analog_mod:
+            ai = index.get((key, cat_ai), [])
+            ao = index.get((key, cat_ao), [])
+            r_ai, ch_ai = first_valid(ai, 0)
+            r_ao, ch_ao = first_valid(ao, 0)
+            check(r_ai is not None or r_ao is not None,
+                  "строка %d: %s — каналы AI/AO из Service" % (r, name),
+                  "нет ни module AI, ни module AO с целым числом каналов — "
+                  "макрос возьмёт AI×8 с предупреждением")
+            if r_ai is not None or r_ao is not None:
+                print("     строка %d: AI %s (Service!F%s), AO %s (Service!F%s)"
+                      % (r, ch_ai if ch_ai is not None else "—",
+                         r_ai if r_ai is not None else "—",
+                         ch_ao if ch_ao is not None else "—",
+                         r_ao if r_ao is not None else "—"))
+            for cat, entries, used_row in (("module AI", ai, r_ai),
+                                           ("module AO", ao, r_ao)):
+                other = [(rr, ch) for rr, ch in sorted(entries)
+                         if rr != used_row and ch is not None]
+                if other and used_row is not None:
+                    print("     %s: взята первая годная строка %d; прочие %s"
+                          % (cat, used_row,
+                             ", ".join("F%d=%d" % (rr, ch) for rr, ch in other)))
+        elif r in by_name:
+            entries = [e for (k, _c), lst in index.items() if k == key
+                       for e in lst]
+            row, ch = first_valid(entries, 1)
+            check(row is not None,
+                  "строка %d: %s — каналы %s (Service!F%s)"
+                  % (r, name, ch, row) if row is not None else
+                  "строка %d: %s — каналы из Service" % (r, name),
+                  "нет целого положительного числа каналов — макрос возьмёт "
+                  "запас с предупреждением")
+
+
 def check_width_conflicts(rows):
     widths = {}
     for row, key, name, w in rows:
@@ -285,12 +400,15 @@ def main(argv):
         return 1
 
     data = book.cells(SHEET_DATA)
-    rows = service_rows(book.cells(SHEET_SERVICE))
+    svc = book.cells(SHEET_SERVICE)
+    rows = service_rows(svc)
 
     print("-- README «Значения примера» ↔ лист «1»")
     check_readme_values(data)
     print("-- наименования строк defRows ↔ Service (ширина)")
     check_names_in_service(data, rows)
+    print("-- каналы Service!F ↔ строки defRows (как читает макрос)")
+    check_channels(data, svc)
     print("-- Service: ширины без противоречий")
     check_width_conflicts(rows)
     print("-- D21 «Шкафов»: формула или число (справочно)")
