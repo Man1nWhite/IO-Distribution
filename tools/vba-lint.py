@@ -22,11 +22,17 @@ vba-lint.py — статическая проверка VBA-модуля (Module
   E13 дублирующийся номер ошибки в Err.Raise vbObjectError + N
   E14 дубликат метки Case в одном Select Case
   E15 ReDim X(1 To N) с явной нулевой/отрицательной границей (Runtime error 9)
-  E16 строка кода внутри процедуры на нулевом отступе (потерян отступ)
+  E16 строка кода внутри процедуры на нулевом отступе (потерян отступ);
+      процедуры берутся из разбора модуля, многострочные сигнатуры учтены
   E17 строка начинается с бинарного оператора, а предыдущая не продолжена «_»
-  E18 ссылка на несуществующую процедуру (вызов с аргументами или «Голый»
-      вызов строки) — ловит и случайно закомментированное определение
       (разорванное выражение — VBA: Compile error: Expected: expression)
+  E18 снят: дубль E08 (E08 сверяет каждое имя со списком своей процедуры,
+      E18 — с объединением списков всех процедур, то есть строго слабее).
+      Номер зарезервирован, чтобы не переиспользовать его в чужих ссылках.
+  E19 комментарий кончается на « _» — VBA продолжает комментарий, и следующая
+      строка молча становится комментарием
+  E20 больше 24 продолжений «_» в одной логической строке
+      (VBA: Too many line continuations)
 
 Предупреждения (код возврата не меняют):
   W01 табуляция вместо пробелов
@@ -40,6 +46,12 @@ vba-lint.py — статическая проверка VBA-модуля (Module
 Без аргументов — все *.bas/*.cls репозитория (обход без .git). Код возврата:
 1, если есть ошибки E*; предупреждения (W*) его не меняют.
 
+Перед обходом файлов линтер гоняет самопроверку правил (SELFTEST ниже):
+каждое правило обязано сработать на своём примере и промолчать на законном
+коде. Правило, которое молча не срабатывает, даёт зелёный вывод без
+проверки — это ловится здесь, а не в разборе чужого модуля. Расхождение
+самопроверки — тоже код возврата 1.
+
 E08 опирается на списки встроенных имён VBA/Office ниже (KEYWORDS, BUILTINS,
 CONSTANTS, TYPES). При легитимном ложном срабатывании — добавьте имя в нужный
 список тем же коммитом, что и правку модуля.
@@ -52,10 +64,15 @@ import collections
 
 MAX_LINE = 100
 ENCODING = "cp1251"
+# Предел VBA на одну логическую строку («Too many line continuations»).
+MAX_CONTINUATIONS = 24
 
 # ---------------------------------------------------------------------------
 # Встроенные имена VBA / Excel / Office (не требуют объявления)
 # ---------------------------------------------------------------------------
+# Только существующие имена: выдуманное имя в списке — это молча выключенная
+# проверка E08 для опечатки в коде. Легитимное ложное срабатывание — имя
+# добавляется сюда тем же коммитом, что и правка модуля.
 KEYWORDS = set("""
 addressof alias attribute byref byval call case const declare default delete
 dim do each else elseif end enum erase error event exit false for friend
@@ -69,11 +86,11 @@ nothing next loop step error basic vba
 BUILTINS = set("""
 abs access application array atn cbool cbyte ccur cdate cdbl cdec cint clng
 clnglng clngptr cmdialog cobj cos csng cstr cvar date dateserial dateadd
-datediff datepart datevalue day debug dir division exp fix format hex int
+datediff datepart datevalue day debug dir exp fix format hex int
 isempty iserror isnull isnumeric isarray isobject isdate ismissing vartype lcase left
 len lbound lcase loc lof ltrim mid minute month monthname now oct right rnd
 round sgn second split sqr str strconv tan time timer timeserial
-timevalue trim typename ucase ubound val variant weekday weekyear year
+timevalue trim typename ucase ubound val variant weekday year
 instr instrrev replace lcase ucase strcomp strconv filter join
 thisworkbook workbook workbooks worksheet worksheets range ranges cells shape
 shapes sheets columns rows selection activewindow windows application screen
@@ -81,9 +98,9 @@ font fill line shadow textframe textframe2 textrange paragraphformat
 addshape addtextbox msofadeclear nothing
 msgbox inputbox createobject getobject copyfile kill name chdir mkdir rmdir
 filedatetime filesize freefile open close print input lock unlock seek eof
-beep randomize sleep
-err rgb iif chrw ascw curdir envar formatcurrency formatdatetime
-isarray objecterror createline rangefromnotification
+beep randomize
+err rgb iif chrw ascw curdir formatcurrency formatdatetime
+isarray
 """.split())
 
 CONSTANTS = set("""
@@ -103,7 +120,7 @@ xlcalculationautomatic xlcalculationmanual xlcalculationsemiautomatic
 
 TYPES = set("""
 long integer double single string boolean variant object byte currency
-decimal date datevariant autocolor collection
+decimal date collection
 """.split())
 
 # ---------------------------------------------------------------------------
@@ -154,6 +171,17 @@ def split_top(text, sep=","):
     return [p.strip() for p in parts if p.strip()]
 
 
+# Продолжение — это «_» в конце строки кода, отделённое пробелом (или
+# единственное на строке): `x = 1 + _`. Хвост `foo_` — часть идентификатора,
+# а не перенос, поэтому endswith("_") здесь не годится.
+CONT_RE = re.compile(r"(?:^|\s)_$")
+
+
+def is_continued(code):
+    """Строка кода (уже без комментария) продолжается на следующей строке."""
+    return bool(CONT_RE.search(code.rstrip()))
+
+
 def build_logical(raw_lines):
     """Склеить строки с продолжением «_». Возвращает [(номер, текст, физ.строки)]."""
     logical = []
@@ -165,7 +193,7 @@ def build_logical(raw_lines):
         if start is None:
             start = n
         span.append(n)
-        if code.endswith("_") and code.count('"') % 2 == 0:
+        if is_continued(code) and code.count('"') % 2 == 0:
             buf += " " + code[:-1].strip()
             continue
         buf += " " + code
@@ -178,9 +206,11 @@ def build_logical(raw_lines):
     return logical
 
 
+# «Static Sub» и «Public Static Sub» — тоже начало процедуры; тип результата
+# бывает массивом («As Long()»), иначе такие процедуры выпадали из разбора.
 PROC_START = re.compile(
-    r"^\s*(public |private |friend )?(sub|function|property (?:get|let|set))"
-    r"\s+([^\s(]+)(\(.*\))?\s*(as\s+\w+)?\s*$",
+    r"^\s*((?:(?:public|private|friend|static)\s+)*)(sub|function|property (?:get|let|set))"
+    r"\s+([^\s(]+)(\(.*\))?\s*(as\s+\w+\s*(?:\(\s*\))?)?\s*$",
     re.I,
 )
 PROC_END = re.compile(r"^\s*end (sub|function|property)\b", re.I)
@@ -250,7 +280,7 @@ def declared_in_proc(proc):
                 names.add(m.group(1))
     for no, text, _ in proc["body"]:
         low = text.lower()
-        if re.match(r"^\s*(dim|static|const)\b", low):
+        if DECL.match(low):
             body = re.sub(r"^\s*(dim|static|const)\s+(withevents\s+)?(const\s+)?", "", low)
             for part in split_top(body):
                 m = re.match(r"(%s)" % NAME_RE, part)
@@ -273,6 +303,24 @@ def labels_in_proc(proc):
 # Проверки
 # ---------------------------------------------------------------------------
 
+# Строка объявления локальной переменной/константы.
+DECL = re.compile(r"^\s*(dim|static|const)\b")
+
+
+def usage_text(proc):
+    """Тело процедуры для поиска использований имени — без объявлений.
+
+    «Dim x As Long: x = 1» — объявление и использование в одной строке:
+    после двоеточия начинается отдельный оператор, его считаем.
+    """
+    out = []
+    for _no, text, _span in proc["body"]:
+        t = mask_strings(text).lower()
+        if DECL.match(t):
+            t = t.split(":", 1)[1] if ":" in t else ""
+        out.append(t)
+    return "\n".join(out)
+
 
 def check_file(path):
     errors = []
@@ -294,7 +342,7 @@ def check_file(path):
         err("E01", 0, "файл не декодируется как Windows-1251: %s" % exc)
         return errors, warnings, []
     if text.encode(ENCODING) != raw:
-        err("E01", 0, "Windows-1251 round-trih не идентичен (битые символы)")
+        err("E01", 0, "Windows-1251 round-trip не идентичен (битые символы)")
     if b"\n" not in raw:
         err("E02", 0, "нет переводов строк")
     if re.search(rb"(?<!\r)\n", raw):
@@ -315,13 +363,27 @@ def check_file(path):
 
     logical = build_logical(raw_lines)
 
+    # E20 — предел VBA: 24 продолжения на логическую строку.
+    for no, _t, span in logical:
+        if len(span) - 1 > MAX_CONTINUATIONS:
+            err("E20", no, "%d продолжений «_» > %d"
+                % (len(span) - 1, MAX_CONTINUATIONS))
+
     # E05
     for i, line in enumerate(raw_lines, start=1):
         code = strip_comment(line).rstrip()
-        if code.endswith("_"):
+        if is_continued(code):
             nxt = raw_lines[i] if i < len(raw_lines) else ""
             if not strip_comment(nxt).strip():
                 err("E05", i, "продолжение «_», а следующая строка пуста/комментарий")
+
+    # E19 — VBA продолжает и комментарий: строка после «' … _» тоже станет
+    # комментарием, код в ней молча исчезает.
+    for i, line in enumerate(raw_lines, start=1):
+        comment = line[len(strip_comment(line)):]
+        if comment.startswith("'") and re.search(r"\s_\s*$", comment):
+            err("E19", i, "комментарий кончается на « _» — строка %d тоже станет "
+                          "комментарием" % (i + 1))
 
     # E06
     if not any(re.match(r"^\s*option\s+explicit\s*$", l, re.I) for l in raw_lines):
@@ -412,11 +474,12 @@ def check_file(path):
             if m and m.group(1) not in proc_names:
                 err("E09", no, "%s: Call %s — процедура не найдена" % (p["name"], m.group(1)))
 
-        # E10/E11 — обработчики ошибок и метки
+        # E10/E11 — обработчики ошибок и метки. Имя метки бывает кириллицей
+        # («On Error GoTo Ошибка»), поэтому NAME_RE, а не [a-z_]\w*.
         labels = labels_in_proc(p)
         open_resume = None
         for no, t, _orig in low_body:
-            m = re.match(r"^\s*on error goto ([a-z_]\w*)", t)
+            m = re.match(r"^\s*on error goto (%s)" % NAME_RE, t)
             if m and m.group(1) not in labels:
                 err("E10", no, "%s: метка «%s» не определена" % (p["name"], m.group(1)))
             if re.match(r"^\s*on error resume next\s*$", t):
@@ -425,48 +488,42 @@ def check_file(path):
             elif re.match(r"^\s*on error goto", t) or re.match(r"^\s*on error resume\b", t):
                 if open_resume is not None and not re.match(r"^\s*on error resume next", t):
                     open_resume = None
-            if re.match(r"^\s*(exit (sub|function)|end (sub|function))", t):
-                pass
         if open_resume is not None:
             err("E11", open_resume, "%s: On Error Resume Next не восстановлен" % p["name"])
 
         # W05 — неиспользуемые метки
         used_labels = set()
         for no, t, _orig in low_body:
-            for m in re.finditer(r"(?:goto|resume)\s+([a-z_]\w*)", t):
+            for m in re.finditer(r"(?:goto|resume)\s+(%s)" % NAME_RE, t):
                 used_labels.add(m.group(1))
         for lb, no in labels.items():
             if lb not in used_labels:
                 warn("W05", no, "%s: метка «%s:» без переходов" % (p["name"], lb))
 
-        # E12 — функция без присваивания результата
+        # E12 — функция без присваивания результата. Присваивание бывает и в
+        # однострочном If («If x Then Foo = 1»), и после двоеточия.
         if p["kind"] == "function":
-            assigned = False
-            for no, t, _orig in low_body:
-                if re.match(r"^\s*%s\s*=" % re.escape(p["name"].lower()), t) or re.match(
-                    r"^\s*set\s+%s\s*=" % re.escape(p["name"].lower()), t
-                ):
-                    assigned = True
-                    break
-            if not assigned:
+            pat = re.escape(p["name"].lower())
+            assign = re.compile(r"(?:^\s*|\bthen\s+|\belse\s+|:\s*)(?:set\s+)?%s\s*="
+                                % pat)
+            if not any(assign.search(t) for _, t, _ in low_body):
                 err("E12", p["start"], "%s: имя функции ни разу не присваивается" % p["name"])
 
-        # E14 — дубликаты Case
-        cases = None
+        # E14 — дубликаты Case. Список меток свой на каждый Select Case:
+        # вложенный Select не должен сбрасывать список внешнего блока.
+        case_stack = []
         for no, t, _orig in low_body:
             s = t.strip()
             if s.startswith("select case"):
-                cases = []
-                continue
-            if cases is not None:
-                if s.startswith("case "):
-                    if not s.startswith("case else"):
-                        cases.extend(x.strip() for x in s[5:].split(","))
-                elif s.startswith("end select"):
-                    for k, v in collections.Counter(cases).items():
+                case_stack.append([])
+            elif s.startswith("end select"):
+                if case_stack:
+                    for k, v in collections.Counter(case_stack.pop()).items():
                         if v > 1:
                             err("E14", no, "%s: дубль Case %s (×%d)" % (p["name"], k, v))
-                    cases = None
+            elif s.startswith("case ") and case_stack:
+                if not s.startswith("case else"):
+                    case_stack[-1].extend(x.strip() for x in s[5:].split(","))
 
         # E15 — ReDim (1 To N) с риском N = 0
         for no, t, _orig in low_body:
@@ -483,84 +540,49 @@ def check_file(path):
             err("E04", i, "нечётное число кавычек в физической строке "
                           "(литерал не может продолжаться через «_»): %s" % code.strip()[:60])
 
-    # E18 — имя в позиции «Имя(...)» обязано быть объявлено (переменная или
-    # массив → индексация) либо быть процедурой/встроенной функцией. Ловит в
-    # том числе случайно закомментированное или удалённое определение.
-    declared = set(mod_names) | proc_names
-    for p2 in procs:
-        declared |= declared_in_proc(p2)
-    for no, text, _ in logical:
-        m = re.match(
-            r"^(private|public\s+)?(dim|const|static|redim|type|enum)\s+"
-            r"(?:withevents\s+)?(%s)" % NAME_RE, text.strip(), re.I)
-        if m:
-            declared.add(m.group(3).lower())
-
-    for p2 in procs:
-        for no, text, _ in p2["body"]:
-            scan = mask_strings(text)
-            scan = re.sub(r"^\s*(public|private|friend)?\s*(sub|function)\s+\S+",
-                          "", scan, flags=re.I)
-            scan = re.sub(r"\.\s*%s" % NAME_RE, " ", scan)
-            for m in re.finditer(r"(?<![.\w])(%s)\s*\(" % NAME_RE, scan):
-                nm = m.group(1).lower()
-                if nm in declared or nm in known:
-                    continue
-                err("E18", no, "%s: «%s(...)» — имя не объявлено и такой "
-                               "процедуры нет" % (p2["name"], m.group(1)))
-
-    # E17 — разорванная конкатенация/выражение
-    cont_idx = set()
-    for start_no, _t, span in logical:
-        for x in span[:-1]:
-            cont_idx.add(x)
+    # E17 — разорванная конкатенация/выражение: строка начинается с бинарного
+    # оператора, а предыдущая не продолжена «_». Чаще всего рвётся именно
+    # перед And/Or/Mod, а не перед «+».
     for i, line in enumerate(raw_lines, start=1):
         s = line.strip()
         if not s or s.startswith("'"):
             continue
-        if i in cont_idx or (i > 1 and (i - 1) in cont_idx):
-            pass
-        if re.match(r"^(&|\+|=|<>|<|>|\*|/|\\\\)\s*\S", s):
+        if re.match(r"^(&|\+|=|<>|<=|>=|<|>|\*|/|\\|\^|and\b|or\b|xor\b|mod\b)\s*\S",
+                    s, re.I):
             prev = strip_comment(raw_lines[i - 2]).rstrip() if i > 1 else ""
-            if not prev.endswith("_"):
+            if not is_continued(prev):
                 err("E17", i, "строка начинается с «%s», но предыдущая не "
                               "продолжена знаком _" % s.split()[0])
 
-    # E13 — дубликаты номеров ошибок
+    # E13 — дубликаты номеров ошибок. Комментарий и строковый литерал — не
+    # код: упоминание «vbObjectError + 28» в пояснении дублем не считается.
     nums = collections.OrderedDict()
     for i, line in enumerate(raw_lines, start=1):
-        m = re.search(r"vbobjecterror\s*\+\s*(\d+)", line, re.I)
+        m = re.search(r"vbobjecterror\s*\+\s*(\d+)", mask_strings(strip_comment(line)),
+                      re.I)
         if m:
             nums.setdefault(int(m.group(1)), []).append(i)
     for code, where in nums.items():
         if len(where) > 1:
             err("E13", where[1], "код ошибки %d reused на строках %s" % (code, where))
 
-    # E16 — строка кода на нулевом отступе внутри процедуры
-    in_proc = False
-    for i, line in enumerate(raw_lines, start=1):
-        s = line.strip()
-        if not s:
-            continue
-        if PROC_START.match(line) and re.match(
-            r"^\s*(public|private|friend)\s+(sub|function)\b", line, re.I
-        ):
-            in_proc = True
-            continue
-        if PROC_END.match(line):
-            in_proc = False
-            continue
-        if not in_proc:
-            continue
-        if line[0] in " \t":
-            continue
-        if s.startswith("'") or re.match(r"^%s:$" % NAME_RE, s):
-            continue
-        err("E16", i, "код внутри процедуры на нулевом отступе: %s" % s[:60])
-
-    # W04 — неиспользуемые параметры/локали
+    # E16 — строка кода на нулевом отступе внутри процедуры. Границы берутся
+    # из разбора модуля: сигнатура в несколько строк («Private Function X( _»)
+    # по физической строке не опознаётся, и раньше тело такой процедуры не
+    # проверялось вовсе.
     for p in procs:
-        flat = "\n".join(mask_strings(t).lower() for _, t, _ in p["body"])
+        for i in range(p["span"][-1] + 1, p.get("end", p["start"])):
+            line = raw_lines[i - 1]
+            s = line.strip()
+            if (not s or line[0] in " \t" or s.startswith("'")
+                    or re.match(r"^%s:$" % NAME_RE, s)):
+                continue
+            err("E16", i, "код внутри процедуры на нулевом отступе: %s" % s[:60])
+
+    # W04 — неиспользуемые параметры/локали. Строка объявления — не
+    # использование: иначе всякий Dim сам себе оправдание и правило молчит.
+    for p in procs:
+        flat = usage_text(p)
         declared = declared_in_proc(p)
         for nm in sorted(declared):
             if nm == p["name"].lower() or nm in TYPES:
@@ -578,17 +600,170 @@ def _close(stack, kind, no, msg, err, proc):
         err("E03", no, "%s в %s" % (msg, proc["name"]))
 
 
+# ---------------------------------------------------------------------------
+# Самопроверка правил: правила, которые молча не срабатывают, — худший вид
+# поломки линтера (вывод зелёный, проверки нет). Каждый кейс — маленький
+# модуль и правило, которое обязано сработать (want) или обязано молчать
+# (skip). Гоняется тем же check_file, что и Module1.bas, до обхода файлов.
+# ---------------------------------------------------------------------------
+
+SELFTEST = [
+    ("E16: многострочная сигнатура, тело на нулевом отступе",
+     "Private Function Много( _\n"
+     "    ByVal a As Long) As Long\n"
+     "Много = a\n"
+     "End Function\n", {"E16"}, set()),
+    ("E16: отступ на месте — молчит",
+     "Private Function Много( _\n"
+     "    ByVal a As Long) As Long\n"
+     "    Много = a\n"
+     "End Function\n", set(), {"E16"}),
+    ("W04: локальная переменная объявлена и не используется",
+     "Private Sub Дело()\n"
+     "    Dim лишняя As Long\n"
+     "    Dim нужная As Long\n"
+     "    нужная = 1\n"
+     "End Sub\n", {"W04"}, set()),
+    ("W04: Dim — не использование, но «Dim x: x = 1» — использование",
+     "Private Sub Дело()\n"
+     "    Dim x As Long: x = 1\n"
+     "End Sub\n", set(), {"W04"}),
+    ("E17: целочисленное деление «\\» в начале строки",
+     "Private Sub Дело()\n"
+     "    Dim x As Long\n"
+     "    x = 10\n"
+     "    \\ 2\n"
+     "End Sub\n", {"E17"}, set()),
+    ("E17: оборванное условие на And",
+     "Private Sub Дело(ByVal x As Long)\n"
+     "    If x = 1\n"
+     "    And x = 2 Then\n"
+     "        MsgBox \"x\"\n"
+     "    End If\n"
+     "End Sub\n", {"E17"}, set()),
+    ("E17: продолжение «_» перед And — законно",
+     "Private Sub Дело(ByVal x As Long)\n"
+     "    If x = 1 _\n"
+     "    And x = 2 Then\n"
+     "        MsgBox \"x\"\n"
+     "    End If\n"
+     "End Sub\n", set(), {"E17"}),
+    ("E10: кириллическая метка не найдена",
+     "Private Sub Дело()\n"
+     "    On Error GoTo Ошибка\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", {"E10"}, set()),
+    ("W05: кириллическая метка с переходом — не лишняя",
+     "Private Sub Дело()\n"
+     "    On Error GoTo Ошибка\n"
+     "    Exit Sub\n"
+     "Ошибка:\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", set(), {"E10", "W05"}),
+    ("E14: дубль Case во внешнем Select при вложенном",
+     "Private Sub Дело(ByVal x As Long)\n"
+     "    Select Case x\n"
+     "        Case 1\n"
+     "            Select Case x\n"
+     "                Case 2\n"
+     "                    MsgBox \"a\"\n"
+     "            End Select\n"
+     "        Case 1\n"
+     "            MsgBox \"b\"\n"
+     "    End Select\n"
+     "End Sub\n", {"E14"}, set()),
+    ("E12: присваивание в однострочном If",
+     "Private Function Флаг(ByVal x As Long) As Boolean\n"
+     "    If x > 0 Then Флаг = True\n"
+     "End Function\n", set(), {"E12"}),
+    ("E13: номер ошибки в комментарии — не дубль",
+     "Private Sub Дело()\n"
+     "    ' vbObjectError + 28 занят ниже\n"
+     "    Err.Raise vbObjectError + 28, , \"x\"\n"
+     "End Sub\n", set(), {"E13"}),
+    ("E13: настоящий дубль номера ошибки",
+     "Private Sub Дело(ByVal x As Long)\n"
+     "    If x = 1 Then\n"
+     "        Err.Raise vbObjectError + 28, , \"x\"\n"
+     "    End If\n"
+     "    Err.Raise vbObjectError + 28, , \"y\"\n"
+     "End Sub\n", {"E13"}, set()),
+    ("E19: комментарий кончается на « _»",
+     "Private Sub Дело()\n"
+     "    ' пояснение с переносом _\n"
+     "    MsgBox \"код, а не комментарий\"\n"
+     "End Sub\n", {"E19"}, set()),
+    ("E20: 25 продолжений в одной логической строке",
+     "Private Sub Дело()\n"
+     "    Dim x As Long\n"
+     "    x = 1 + _\n" + "        1 + _\n" * 24 + "        1\n"
+     "End Sub\n", {"E20"}, set()),
+    ("E20: ровно 24 продолжения — предел не превышен",
+     "Private Sub Дело()\n"
+     "    Dim x As Long\n"
+     "    x = 1 + _\n" + "        1 + _\n" * 23 + "        1\n"
+     "End Sub\n", set(), {"E20"}),
+    ("E08: выдуманное «встроенное» имя больше не прикрывает опечатку",
+     "Private Sub Дело()\n"
+     "    Sleep 1\n"
+     "End Sub\n", {"E08"}, set()),
+]
+
+
+def selftest():
+    """Прогнать SELFTEST. Возвращает список расхождений (пустой — всё ок)."""
+    import tempfile
+
+    bad = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for i, (title, body, want, skip) in enumerate(SELFTEST):
+            path = os.path.join(tmp, "case%d.bas" % i)
+            with open(path, "wb") as fh:
+                fh.write(("Option Explicit\n\n" + body).replace("\n", "\r\n")
+                         .encode(ENCODING))
+            errors, warnings, _logical = check_file(path)
+            got = {rule for rule, _no, _msg in errors + warnings}
+            missing = sorted(want - got)
+            extra = sorted(skip & got)
+            if missing or extra:
+                bad.append("%s: не сработало %s; сработало зря %s"
+                           % (title, ", ".join(missing) or "—",
+                              ", ".join(extra) or "—"))
+    # Продолжение — только « _», а не хвост идентификатора; сигнатуры
+    # «Static Sub» и «As Long()» обязаны попадать в разбор процедур.
+    if not is_continued("x = 1 + _") or is_continued("Dim foo_"):
+        bad.append("is_continued: « _» и хвост «foo_» различаются неверно")
+    for sig in ("Static Sub Дело()", "Public Static Sub Дело()",
+                "Private Function Массив() As Long()"):
+        if not PROC_START.match(sig):
+            bad.append("PROC_START не узнаёт сигнатуру: %s" % sig)
+    return bad
+
+
+def default_targets(root):
+    """Все *.bas/*.cls репозитория. В .git не заходим (os.walk в него и не
+    спускается), а .github обходим — подстрока «.git» ловила и его."""
+    out = []
+    for dp, dirs, files in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d != ".git")
+        out.extend(os.path.join(dp, f) for f in files
+                   if f.lower().endswith((".bas", ".cls")))
+    return sorted(out)
+
+
 def main(argv):
     targets = argv[1:]
     if not targets:
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        targets = sorted(
-            os.path.join(dp, f)
-            for dp, _d, fs in os.walk(root)
-            if ".git" not in dp
-            for f in fs
-            if f.lower().endswith((".bas", ".cls"))
-        )
+        targets = default_targets(root)
+    bad = selftest()
+    print("самопроверка правил: %d кейсов, расхождений %d"
+          % (len(SELFTEST), len(bad)))
+    for msg in bad:
+        print("  FAIL " + msg)
+    if bad:
+        return 1
+
     if not targets:
         print("нет файлов .bas/.cls для проверки")
         return 0
