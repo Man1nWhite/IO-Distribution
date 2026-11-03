@@ -15,7 +15,9 @@
   4. команды раздела «Проверки» README ↔ шаги джоба lint в CI, и они же ↔
      `tools/check-all.py --list` (тот же порядок): новый инструмент обязан
      попасть во все три места, иначе он тихо не работает; джоб windows
-     запускает `python tools/check-all.py`;
+     запускает `python tools/check-all.py`. Обратная сторона: каждый
+     `tools/*.py` обязан быть чьим-то шагом (кроме самого check-all.py), а
+     шаг — ссылаться на существующий файл;
   5. счётчики, обещанные README («N векторов» — каждое вхождение, «все N
      имён», «N логических строк», если оно названо), ↔ фактические
      результаты parse-spec.py, check-readme-map.py и vba-lint.py;
@@ -330,6 +332,24 @@ def ci_commands():
                       ci_job("lint"))
 
 
+def check_tools_registered():
+    """Каждый tools/*.py попал в шаги — иначе он молча не работает.
+
+    AGENTS.md требует для нового инструмента три места (STEPS в
+    check-all.py, шаг CI, раздел «Проверки» README), но сверялся только
+    состав уже названных шагов: инструмент, не попавший никуда, лежал бы в
+    репозитории и никогда не запускался. check-all.py — сам запускающий, он
+    шагом не считается.
+    """
+    steps = ci_commands()
+    registered = {Path(s.split()[-1]).name for s in steps}
+    scripts = {p.name for p in TOOLS.glob("*.py")} - {CHECK_ALL.name}
+    check("каждый tools/*.py — шаг CI (кроме самого check-all.py)",
+          sorted(scripts - registered), [])
+    check("шаги CI ссылаются на существующие tools/*.py",
+          sorted(n for n in registered if not (TOOLS / n).is_file()), [])
+
+
 def check_windows_job():
     # README обещает: джоб windows — те же шаги через tools/check-all.py.
     runs = re.findall(r"(?m)^\s*run:\s*(.+?)\s*$", ci_job("windows"))
@@ -360,7 +380,7 @@ def check_ci_matches_readme():
         check("раздел «Проверки» README == шаги CI", None, ci)
         return
     # got — всегда код (шаги CI), want — доки (README). Без sorted():
-    # README обещает «ровно те же шесть шагов … в том же порядке», и первый
+    # README обещает «ровно те же шаги … в том же порядке», и первый
     # упавший шаг останавливает прогон — порядок здесь часть обещания.
     check("раздел «Проверки» README == шаги CI (тот же порядок)",
           ci, doc)
@@ -517,6 +537,7 @@ def main():
     print("-- состав проверок README ↔ CI ↔ tools/check-all.py")
     check_ci_matches_readme()
     check_ci_matches_check_all()
+    check_tools_registered()
     check_windows_job()
     print("-- счётчики README ↔ результаты инструментов")
     check_readme_counts()

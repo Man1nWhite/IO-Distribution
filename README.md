@@ -31,7 +31,7 @@ python3 tools/check-example.py
 python3 tools/check-sync.py
 ```
 
-Это ровно те же шесть шагов, что в CI, в том же порядке; одной командой на
+Это ровно те же шаги, что в CI, в том же порядке; одной командой на
 любой ОС — `python3 tools/check-all.py` (Windows: `py tools\check-all.py`;
 `--quiet` — компактно, по строке на шаг; `--list` — только перечислить шаги;
 `./tools/check-all.sh` — обёртка).
