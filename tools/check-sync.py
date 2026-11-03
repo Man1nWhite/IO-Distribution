@@ -427,6 +427,45 @@ def tool_output(path):
     return out + err
 
 
+def check_readme_tables_shape():
+    """Каждая строка таблицы README начинается и кончается на «|».
+
+    Перенос внутри ячейки рвёт таблицу: Markdown закрывает её на первой
+    строке без завершающей «|», а все следующие строки — уже обычный текст
+    с вертикальными чертами. Остальные проверки этого не видят: они читают
+    таблицу по префиксу «| Строки |» и до первой пустой строки. Одна
+    проверка на таблицу, в сообщении — все виновные строки.
+    """
+    lines = readme().splitlines()
+    fence = False
+    tables, cur = [], []
+    for no, line in enumerate(lines, 1):
+        s = line.strip()
+        if s.startswith("```"):
+            fence = not fence
+        if not fence and s.startswith("|"):
+            cur.append((no, line))
+            continue
+        if cur:
+            tables.append(cur)
+            cur = []
+        if fence or not s:
+            continue
+        # Строка сразу после таблицы без пустой строки — тоже её часть:
+        # именно так выглядит продолжение перенесённой ячейки.
+        if tables and no == tables[-1][-1][0] + 1 and s.endswith("|"):
+            tables[-1].append((no, line))
+    if cur:
+        tables.append(cur)
+
+    for tbl in tables:
+        bad = [no for no, line in tbl
+               if not line.strip().startswith("|")
+               or not line.strip().endswith("|")]
+        check("таблица README со строки %d: все строки замкнуты «|»"
+              % tbl[0][0], [], bad)
+
+
 def check_readme_counts():
     """Числа, обещанные README, против фактических результатов инструментов."""
     doc = readme()
@@ -535,6 +574,7 @@ def main():
     check_readme_constants()
     print("-- таблицы строк и ширин Module1.bas ↔ README")
     check_rows_and_widths()
+    check_readme_tables_shape()
     print("-- номера ошибок Module1.bas ↔ README")
     check_error_codes()
     print("-- векторы разбора: ТестРазбораЧисел (VBA) ↔ tools/parse-spec.py")
