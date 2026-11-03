@@ -31,7 +31,7 @@
   8. номера `Err.Raise vbObjectError + N` ↔ таблица «Ошибки» в README, в обе
      стороны: новая ошибка описана, описанная — существует;
   9. векторы самопроверки ТестРазбораЧисел (Module1.bas, гоняется в Excel)
-     ↔ VECTORS / WRAP / KOL из tools/parse-spec.py;
+     ↔ VECTORS / WRAP / KOL / REZERV из tools/parse-spec.py;
  10. выпуск отложен — README и AGENTS.md не упоминают выпуски (без версий,
      «релизов»/«тегов» и ссылок compare|releases/tag);
  11. локальный хук `.githooks/pre-commit` запускает `tools/vba-lint.py`,
@@ -276,7 +276,7 @@ def check_error_codes():
 # Строковое выражение VBA из литералов и ChrW(N): "1" & ChrW(160) & "500".
 VBA_STR = r'(?:"(?:[^"]|"")*"|ChrW\$?\(\d+\))'
 VBA_TEST_CALL = re.compile(
-    r"(?m)^\s*(ТестЧисла|ТестЦелого|ТестКоличества)\s+(%s(?:\s*&\s*%s)*)\s*,"
+    r"(?m)^\s*(ТестЧисла|ТестЦелого|ТестКоличества|ТестРезерва)\s+(%s(?:\s*&\s*%s)*)\s*,"
     r"\s*(-?MAX_LONG|-?\d+(?:\.\d+)?)\s*,\s*n\s*,\s*bad\s*$"
     % (VBA_STR, VBA_STR))
 
@@ -295,15 +295,17 @@ def check_parse_vectors():
     top = spec["MAX_LONG"]
     py = {"ТестЧисла": Counter((s, float(w)) for s, w in spec["VECTORS"]),
           "ТестЦелого": Counter((s, float(w)) for s, w in spec["WRAP"]),
-          "ТестКоличества": Counter((s, float(w)) for s, w in spec["KOL"])}
+          "ТестКоличества": Counter((s, float(w)) for s, w in spec["KOL"]),
+          "ТестРезерва": Counter((s, float(w)) for s, w in spec["REZERV"])}
     vba = {"ТестЧисла": Counter(), "ТестЦелого": Counter(),
-           "ТестКоличества": Counter()}
+           "ТестКоличества": Counter(), "ТестРезерва": Counter()}
     for kind, expr, num in VBA_TEST_CALL.findall(bas_text()):
         want = {"MAX_LONG": top, "-MAX_LONG": -top}.get(num)
         vba[kind][(vba_string(expr), float(num if want is None else want))] += 1
     for kind, func, table in (("ТестЧисла", "ЧислоИзТекста", "VECTORS"),
                               ("ТестЦелого", "ИзвлечьЧисло", "WRAP"),
-                              ("ТестКоличества", "КолИзЗначения", "KOL")):
+                              ("ТестКоличества", "КолИзЗначения", "KOL"),
+                              ("ТестРезерва", "РезервДоля", "REZERV")):
         check("векторы %s: ТестРазбораЧисел (Module1.bas) == %s "
               "(tools/parse-spec.py)" % (func, table),
               sorted((vba[kind] - py[kind]).elements()),

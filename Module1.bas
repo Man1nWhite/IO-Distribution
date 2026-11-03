@@ -178,7 +178,6 @@ Public Sub —оздать онфигуратор()
     Dim defLens() As Double
 
     Dim v As Variant
-    Dim fv As Double
     Dim ctrlCount As Long
     Dim total As Long
     Dim muxQty As Long
@@ -251,6 +250,8 @@ Public Sub —оздать онфигуратор()
     Dim errCode As Double
     Dim errLabel As String
     Dim reserveText As String
+    Dim wasReserveText As Boolean
+    Dim reserveClamped As Boolean
 
     gWarn = vbNullString
     gLastDio = 0
@@ -311,36 +312,21 @@ Public Sub —оздать онфигуратор()
                 "Ќедопустимое значение D18. Ќужно 3, 4, 6 или 8 реек."
     End Select
 
-    fv = 0
     reserveText = vbNullString
     v = ws.Range("D19").Value2
 
+    ' „исло или дол€ Ч решает –езервƒол€ (зеркало в tools/parse-spec.py).
     ' “екст (Ђ20 %ї) разбираетс€ „исло»з“екста, как в B18/D18/столбце D, и
     ' всегда даЄт предупреждение Ч иначе 0 % резерва был бы незаметен.
-    If Not IsError(v) And Not IsEmpty(v) Then
-        If IsNumeric(v) Then
-            fv = CDbl(v)
-        Else
-            reserveText = Trim$(CStr(v))
-            If Len(reserveText) > 0 Then fv = „исло»з“екста(reserveText)
-        End If
-    End If
+    gFreeFrac = –езервƒол€(v, wasReserveText, reserveClamped)
 
-    If fv > 1 Then
-        gFreeFrac = fv / 100#
-    Else
-        gFreeFrac = fv
-    End If
-
-    If gFreeFrac < 0 Then gFreeFrac = 0
-
-    If gFreeFrac >= 0.9 Then
-        gFreeFrac = 0.9
+    If reserveClamped Then
         gWarn = gWarn & vbCrLf & _
             "  Х –езерв D19 ограничен значением 90%."
     End If
 
-    If Len(reserveText) > 0 Then
+    If wasReserveText Then
+        reserveText = Trim$(CStr(v))
         gWarn = gWarn & vbCrLf & _
             "  Х D19: резерв записан текстом (""" & reserveText & _
             """); прин€то " & Format(gFreeFrac, "0%") & "."
@@ -3306,6 +3292,47 @@ Private Sub «аписать„ислоЎкафов(ByVal ws As Worksheet, ByVal n As Long)
     End If
 End Sub
 
+' –езерв D19: дол€ свободного места на рейке. „исло > 1 Ч проценты
+' (20 -> 0.2), <= 1 Ч дол€ (0.2 -> 0.2). ѕоэтому 1 Ч это 100 %, а не 1 %:
+' и числом, и текстом (Ђ1 %ї) даЄт 0.9 после ограничени€; 1 % задаЄтс€
+' только долей 0.01. ќтрицательное -> 0, всЄ >= 90 % -> 0.9 (clamped).
+' wasText Ч значение было непустым нечисловым текстом (вызывающий предупреждает).
+' ¬ыделено из —оздать онфигуратор, чтобы правило гон€лось векторами в Excel
+' и в tools/parse-spec.py: поведение здесь намеренно сохранено, а не Ђисправленої.
+Private Function –езервƒол€(ByVal v As Variant, _
+    ByRef wasText As Boolean, ByRef clamped As Boolean) As Double
+
+    Dim fv As Double
+    Dim t As String
+
+    fv = 0
+    wasText = False
+    clamped = False
+
+    If Not IsError(v) And Not IsEmpty(v) Then
+        If IsNumeric(v) Then
+            fv = CDbl(v)
+        Else
+            t = Trim$(CStr(v))
+            wasText = Len(t) > 0
+            If wasText Then fv = „исло»з“екста(t)
+        End If
+    End If
+
+    If fv > 1 Then
+        –езервƒол€ = fv / 100#
+    Else
+        –езервƒол€ = fv
+    End If
+
+    If –езервƒол€ < 0 Then –езервƒол€ = 0
+
+    If –езервƒол€ >= 0.9 Then
+        –езервƒол€ = 0.9
+        clamped = True
+    End If
+End Function
+
 Private Function „итать„исло( _
     ByVal ws As Worksheet, ByVal addr As String) As Double
 
@@ -3586,6 +3613,20 @@ Private Sub “ест–азбора„исел()
     “ест оличества "1_000", 1, n, bad
     “ест оличества "99999999999", MAX_LONG, n, bad
 
+    ' –езервƒол€: правило D19. Ђ1ї и Ђ1 %ї Ч 100 %, а не 1 %.
+    “ест–езерва "1", 0.9, n, bad
+    “ест–езерва "0", 0, n, bad
+    “ест–езерва "20", 0.2, n, bad
+    “ест–езерва "90", 0.9, n, bad
+    “ест–езерва "91", 0.9, n, bad
+    “ест–езерва "100", 0.9, n, bad
+    “ест–езерва "150", 0.9, n, bad
+    “ест–езерва "-5", 0, n, bad
+    “ест–езерва "1 %", 0.9, n, bad
+    “ест–езерва "20 %", 0.2, n, bad
+    “ест–езерва "нет", 0, n, bad
+    “ест–езерва "", 0, n, bad
+
     If Len(bad) = 0 Then
         MsgBox "–азбор чисел: " & n & " векторов, расхождений нет.", _
                vbInformation
@@ -3643,6 +3684,21 @@ Private Sub “ест оличества(ByVal s As String, ByVal want As Double, _
 
     If got <> want Then
         bad = bad & vbCrLf & "   ол»з«начени€(""" & s & """) = " & got & _
+              ", ожидалось " & want
+    End If
+End Sub
+
+Private Sub “ест–езерва(ByVal s As String, ByVal want As Double, _
+                        ByRef n As Long, ByRef bad As String)
+    Dim got As Double
+    Dim wasText As Boolean
+    Dim clamped As Boolean
+
+    n = n + 1
+    got = –езервƒол€(s, wasText, clamped)
+
+    If Abs(got - want) > 0.000000001 Then
+        bad = bad & vbCrLf & "  –езервƒол€(""" & s & """) = " & got & _
               ", ожидалось " & want
     End If
 End Sub
