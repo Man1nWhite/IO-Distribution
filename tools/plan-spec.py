@@ -20,6 +20,10 @@
 канонические сценарии, проверка инвариантов (нет переполнения рейки, все
 элементы размещены, связка не рвётся между шкафами) и рандомизированные
 прогоны с фиксированным seed со сверкой с брутфорсом на малых задачах.
+Прогонов два: круглые ширины (равные остатки реек — проверка дедупликации
+в SearchBlocks) и настоящие ширины модулей (13, 23, 157, …). Каждый
+прогон проверяет и то, что он не выродился: лимит перебора не достигнут
+(иначе сравнивать с брутфорсом нечего) и есть как укладки, так и отказы.
 
 МЕНЯЕШЬ АЛГОРИТМ В VBA — МЕНЯЙ ЭТОТ ФАЙЛ. Автоматической сверки нет:
 зеркало переводится из VBA вручную, расхождение смотрит человек.
@@ -454,9 +458,10 @@ def scenario_shared_budget():
     res = try_place_group_in_cab(rails, lens, {}, 1, "M", items, blocks,
                                  budget=budget)
     check("Бюджет: поиск упёрся в лимит", res["hit_limit"])
-    check("Бюджет: счётчик сквозной, а не на вызов",
-          budget.nodes > budget.limit)
-    check("Бюджет: превышение не больше числа поисков",
+    # Сам по себе «nodes > limit» ничего не доказывает: счётчик на вызов
+    # тоже его превысит. Сквозной бюджет доказывает следующая проверка.
+    check("Бюджет: лимит взведён", budget.nodes > budget.limit)
+    check("Бюджет: счётчик сквозной — превышение не больше числа поисков",
           budget.nodes <= budget.limit + budget.search_calls,
           f"nodes={budget.nodes} calls={budget.search_calls}")
 
@@ -465,21 +470,32 @@ def scenario_shared_budget():
 # Рандом со сверкой с брутфорсом.
 # ---------------------------------------------------------------------------
 
-def randomized(trials=600, seed=20261015):
+def randomized(trials=600, seed=20261015, caps_pool=(80, 100, 120),
+               used_pool=(0, 0, 20), widths=(10, 20, 30, 40, 50),
+               max_blk=6, max_per_blk=3, label=""):
+    """Рандом со сверкой с брутфорсом.
+
+    Ширины по умолчанию круглые и кратны 10 — так часто выходит равное
+    свободное место (проверка дедупликации реек в SearchBlocks). Второй
+    прогон в main() берёт настоящие ширины модулей (13, 23, 157, …), где
+    равных остатков почти не бывает.
+    """
     rng = random.Random(seed)
+    tag = f"{label} " if label else ""
     mism_plan = mism_group = state_dirty = inv_fail = 0
     skipped_limit = 0
+    placed_ok = placed_no = 0
     for t in range(trials):
         n_rails = rng.randint(1, 4)
-        caps = [float(rng.choice([80, 100, 120])) for _ in range(n_rails)]
-        used = [float(rng.choice([0, 0, 20])) for _ in range(n_rails)]
-        n_blk = rng.randint(1, 6)
+        caps = [float(rng.choice(caps_pool)) for _ in range(n_rails)]
+        used = [float(rng.choice(used_pool)) for _ in range(n_rails)]
+        n_blk = rng.randint(1, max_blk)
         lens, items, blocks = [], [], []
         for b in range(n_blk):
-            for _ in range(rng.randint(1, 3)):
+            for _ in range(rng.randint(1, max_per_blk)):
                 items.append(len(lens))
                 blocks.append(b)
-                lens.append(float(rng.choice([10, 20, 30, 40, 50])))
+                lens.append(float(rng.choice(widths)))
         free = [c - u for c, u in zip(caps, used)]
 
         # Целые блоки против брутфорса.
@@ -508,21 +524,34 @@ def randomized(trials=600, seed=20261015):
         elif res["ok"] != brute_force(lens, free):
             mism_group += 1
         if res["ok"]:
+            placed_ok += 1
             probs = check_invariants(f"rand{t}", rails, lens, placed,
                                      [(items, 1)])
             if probs:
                 inv_fail += 1
-        elif rails.snapshot() != before or placed:
-            state_dirty += 1
-    check(f"Рандом ({trials}, seed={seed}): целые блоки == брутфорс",
+        else:
+            placed_no += 1
+            if rails.snapshot() != before or placed:
+                state_dirty += 1
+    check(f"{tag}Рандом ({trials}, seed={seed}): целые блоки == брутфорс",
           mism_plan == 0, f"расхождений {mism_plan}")
-    check("Рандом: группа с дроблением == брутфорс по элементам",
+    check(f"{tag}Рандом: группа с дроблением == брутфорс по элементам",
           mism_group == 0, f"расхождений {mism_group}")
-    check("Рандом: неудача не пачкает состояние", state_dirty == 0,
+    check(f"{tag}Рандом: неудача не пачкает состояние", state_dirty == 0,
           f"случаев {state_dirty}")
-    check("Рандом: инварианты при успехе", inv_fail == 0,
+    check(f"{tag}Рандом: инварианты при успехе", inv_fail == 0,
           f"случаев {inv_fail}")
-    print(f"     (пропущено из-за лимита перебора: {skipped_limit})")
+    # Прогон, в котором каждая задача упёрлась в лимит перебора, зелёный
+    # пустой проверкой: сравнивать с брутфорсом было нечего. Задачи здесь
+    # малы, лимит недостижим — если он всё-таки взведён, чинить генератор.
+    check(f"{tag}Рандом: лимит перебора не достигнут", skipped_limit == 0,
+          f"пропущено {skipped_limit}")
+    # Второй способ выродиться — все задачи одного исхода.
+    check(f"{tag}Рандом: есть и укладки, и отказы",
+          placed_ok > 0 and placed_no > 0,
+          f"уложено {placed_ok}, отказов {placed_no}")
+    print(f"     (уложено {placed_ok}, отказов {placed_no}, "
+          f"пропущено из-за лимита перебора: {skipped_limit})")
 
 
 def main():
@@ -532,6 +561,14 @@ def main():
     scenario_tight_cabinet()
     scenario_shared_budget()
     randomized()
+    # Второй прогон: настоящие ширины модулей и барьеров (defLensFallback),
+    # до 8 блоков — остатки реек почти никогда не равны, дедупликация
+    # SearchBlocks не помогает и перебор идёт шире. Ёмкости подобраны так,
+    # чтобы задачи были пограничными: и целые блоки не влезают, и дробление
+    # срабатывает (иначе прогон вырождается в одни отказы или одни укладки).
+    randomized(trials=400, seed=20261103, caps_pool=(200, 260, 320),
+               used_pool=(0, 0, 23), widths=(13, 23, 35, 67, 100, 110, 157, 164),
+               max_blk=8, max_per_blk=2, label="Неровные ширины:")
     if FAIL:
         print(f"\nрасхождений: {len(FAIL)}")
         return 1

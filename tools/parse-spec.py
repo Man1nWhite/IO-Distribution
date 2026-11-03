@@ -15,16 +15,26 @@
 
 Ветку `IsNumeric` → `CDbl`, которой потребители VBA опережают разбор, зеркало
 не покрывает — она зависит от системной локали (`izvlech_chislo` приближает её
-через `float()`: в en-US `IsNumeric("1,234")` = True, а `float("1,234")` —
-ValueError). Булевы значения (`TRUE`/`FALSE` в ячейке) обе стороны трактуют
+регуляркой `_FLOATLIKE` + `float()`: в en-US `IsNumeric("1,234")` = True, а
+`float("1,234")` — ValueError). Голый `float()` на эту роль не годится: он
+принимает "nan", "inf" и "1_000", а `IsNumeric` — нет; на "nan"/"inf" зеркало
+падало в `int(d)`, на "1_000" возвращало 1000 вместо 1. Форма с экспонентой
+«1D5» (VBA пишет Double и так) не покрыта — как и локаль, это граница
+приближения. Булевы значения (`TRUE`/`FALSE` в ячейке) обе стороны трактуют
 как 0 — в VBA `ИзвлечьЧисло` отсекает их до `IsNumeric`.
 
 Код возврата: 0 — все векторы совпали, 1 — есть расхождение.
 """
 
+import re
 import sys
 
 MAX_LONG = 2147483647
+
+# Приближение IsNumeric для текста: только десятичная запись (знак, цифры,
+# дробная часть, экспонента) и пробелы по краям. float() шире: "nan", "inf",
+# "1_000" он берёт, а VBA — нет, и такие значения уходят в ЧислоИзТекста.
+_FLOATLIKE = re.compile(r"^\s*[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?\s*$")
 
 
 def is_digit(c):
@@ -114,12 +124,11 @@ def izvlech_chislo(v):
     # Empty/ошибка и булево — 0 (в VBA булево отсекается vbBoolean до IsNumeric).
     if v is None or isinstance(v, bool):
         return 0
-    try:
+    if isinstance(v, (int, float)):
         d = float(v)
-        numeric = True
-    except (TypeError, ValueError):
-        numeric = False
-    if not numeric:
+    elif isinstance(v, str) and _FLOATLIKE.match(v):
+        d = float(v)
+    else:
         d = chislo_iz_teksta(str(v))
 
     d = float(int(d))          # Fix: отбрасывание, а не округление
@@ -171,6 +180,8 @@ WRAP = [
     ("1 500", 1500),
     ("нет", 0),
     ("", 0),
+    ("nan", 0),                      # float() берёт, IsNumeric — нет
+    ("1_000", 1),                    # Python-разделитель разрядов, не число
 ]
 
 
