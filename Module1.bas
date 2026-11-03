@@ -178,7 +178,6 @@ Public Sub —оздать онфигуратор()
     Dim defLens() As Double
 
     Dim v As Variant
-    Dim fv As Double
     Dim ctrlCount As Long
     Dim total As Long
     Dim muxQty As Long
@@ -230,9 +229,6 @@ Public Sub —оздать онфигуратор()
     Dim capFull As Double
     Dim capCtrl As Double
 
-    Dim gotCDI As Long
-    Dim gotCDO As Long
-
     Dim leftCnt As Long
     Dim leftDI As Long
     Dim leftDO As Long
@@ -254,6 +250,9 @@ Public Sub —оздать онфигуратор()
     Dim errCode As Double
     Dim errLabel As String
     Dim reserveText As String
+    Dim wasReserveText As Boolean
+    Dim reserveClamped As Boolean
+    Dim reserveWasOne As Boolean
 
     gWarn = vbNullString
     gLastDio = 0
@@ -314,36 +313,25 @@ Public Sub —оздать онфигуратор()
                 "Ќедопустимое значение D18. Ќужно 3, 4, 6 или 8 реек."
     End Select
 
-    fv = 0
     reserveText = vbNullString
     v = ws.Range("D19").Value2
 
+    ' „исло или дол€ Ч решает –езервƒол€ (зеркало в tools/parse-spec.py).
     ' “екст (Ђ20 %ї) разбираетс€ „исло»з“екста, как в B18/D18/столбце D, и
     ' всегда даЄт предупреждение Ч иначе 0 % резерва был бы незаметен.
-    If Not IsError(v) And Not IsEmpty(v) Then
-        If IsNumeric(v) Then
-            fv = CDbl(v)
-        Else
-            reserveText = Trim$(CStr(v))
-            If Len(reserveText) > 0 Then fv = „исло»з“екста(reserveText)
-        End If
-    End If
+    gFreeFrac = –езервƒол€(v, wasReserveText, reserveClamped, reserveWasOne)
 
-    If fv > 1 Then
-        gFreeFrac = fv / 100#
-    Else
-        gFreeFrac = fv
-    End If
-
-    If gFreeFrac < 0 Then gFreeFrac = 0
-
-    If gFreeFrac >= 0.9 Then
-        gFreeFrac = 0.9
+    If reserveWasOne Then
+        gWarn = gWarn & vbCrLf & _
+            "  Х D19 = 1 читаетс€ как 100% (дол€), резерв ограничен 90%." & _
+            " ƒл€ 1% введите число 0,01."
+    ElseIf reserveClamped Then
         gWarn = gWarn & vbCrLf & _
             "  Х –езерв D19 ограничен значением 90%."
     End If
 
-    If Len(reserveText) > 0 Then
+    If wasReserveText Then
+        reserveText = Trim$(CStr(v))
         gWarn = gWarn & vbCrLf & _
             "  Х D19: резерв записан текстом (""" & reserveText & _
             """); прин€то " & Format(gFreeFrac, "0%") & "."
@@ -697,11 +685,8 @@ Public Sub —оздать онфигуратор()
     If Not gSeparateMode Then
         For c = 1 To cabCount
             If cabCtrl(c) > 0 Then
-                «акрепить–еле«а онтроллером _
-                    c, TYP_DI, DI_PER_CTRL, gotCDI
-
-                «акрепить–еле«а онтроллером _
-                    c, TYP_DO, DO_PER_CTRL, gotCDO
+                «акрепить–еле«а онтроллером c, TYP_DI, DI_PER_CTRL
+                «акрепить–еле«а онтроллером c, TYP_DO, DO_PER_CTRL
             End If
         Next c
     End If
@@ -1086,9 +1071,10 @@ End Sub
 
 Private Sub «акрепить–еле«а онтроллером( _
     ByVal cabId As Long, ByVal relType As Long, _
-    ByVal want As Long, ByRef gotCnt As Long)
+    ByVal want As Long)
 
     Dim b As Long
+    Dim gotCnt As Long
 
     gotCnt = 0
     If want <= 0 Then Exit Sub
@@ -2013,46 +1999,52 @@ Private Function TryPlacePartialSplit( _
 
             done(best) = True
 
-            ' ¬ариант блоков: раздробленные Ч по элементам, остальные целиком.
-            nextId = 0
+            ' ‘аза 2, шаг 1 Ч тот же вариант, что шаг 1 фазы 1 (раздроблен
+            ' только самый широкий блок). ѕовтор ничего не даЄт, но тратит
+            ' сквозной бюджет узлов: на трудной группе это лишние узлы
+            ' вплоть до ошибки 44/46. ‘аза 2 начинаетс€ со второго блока.
+            If phase = 1 Or nTry > 1 Then
+                ' ¬ариант блоков: раздробленные Ч по элементам, остальные целиком.
+                nextId = 0
 
-            For blk = 1 To nBlk
-                blkMap(blk) = 0
+                For blk = 1 To nBlk
+                    blkMap(blk) = 0
 
-                If blkCnt(blk) > 0 And Not done(blk) Then
-                    nextId = nextId + 1
-                    blkMap(blk) = nextId
+                    If blkCnt(blk) > 0 And Not done(blk) Then
+                        nextId = nextId + 1
+                        blkMap(blk) = nextId
+                    End If
+                Next blk
+
+                ReDim part(1 To n)
+                partN = nextId
+
+                For j = 1 To n
+                    If done(blocks(j)) Then
+                        partN = partN + 1
+                        part(j) = partN
+                    Else
+                        part(j) = blkMap(blocks(j))
+                    End If
+                Next j
+
+                ' ÷елых блоков не осталось Ч это штатный фоллбэк вызывающего.
+                If partN >= n Then Exit For
+
+                If TryPlanBlocks( _
+                    cabId, kind, items, part, n, partN, _
+                    plan, localLimit, nodes) Then
+
+                    CommitPlan items, part, n, plan, railsUsed
+                    TryPlacePartialSplit = True
+                    Exit Function
                 End If
-            Next blk
 
-            ReDim part(1 To n)
-            partN = nextId
-
-            For j = 1 To n
-                If done(blocks(j)) Then
-                    partN = partN + 1
-                    part(j) = partN
-                Else
-                    part(j) = blkMap(blocks(j))
+                ' ѕредел поиска уже достигнут: следующие варианты дороже.
+                If localLimit Then
+                    hitLimit = True
+                    Exit Function
                 End If
-            Next j
-
-            ' ÷елых блоков не осталось Ч это штатный фоллбэк вызывающего.
-            If partN >= n Then Exit For
-
-            If TryPlanBlocks( _
-                cabId, kind, items, part, n, partN, _
-                plan, localLimit, nodes) Then
-
-                CommitPlan items, part, n, plan, railsUsed
-                TryPlacePartialSplit = True
-                Exit Function
-            End If
-
-            ' ѕредел поиска уже достигнут: следующие варианты только дороже.
-            If localLimit Then
-                hitLimit = True
-                Exit Function
             End If
         Next nTry
     Next phase
@@ -2112,6 +2104,12 @@ Private Sub ѕроверить–азмещение()
                 "” размещЄнного элемента нет корректной рейки."
         End If
 
+    Next i
+
+    ' ¬ладелец провер€етс€ отдельным проходом: его индекс может быть больше
+    ' текущего, и в первом проходе его рейка ещЄ не проверена Ч mRail(owner)=0
+    ' дал бы Ђошибка VBA 9ї вместо кода 60/61.
+    For i = 1 To gTotalMods
         owner = mAnalogOwner(i)
 
         If owner > 0 Then
@@ -2766,7 +2764,7 @@ Private Function  аналыѕо атегории( _
                     If IsNumeric(v) Then
                         d = CDbl(v)
 
-                        If d >= 0 And d = Fix(d) Then
+                        If d >= 0 And d <= MAX_LONG And d = Fix(d) Then
                              аналыѕо атегории = CLng(d)
                             found = True
                             Exit Function
@@ -3215,26 +3213,20 @@ End Function
 Private Function „итать ол( _
     ByVal ws As Worksheet, ByVal r As Long) As Long
 
-    Dim v As Variant
-    Dim d As Double
+    ' —ам факт разбора текста отмечает ѕроверитьячейку ол.
+    „итать ол =  ол»з«начени€(ws.Range(COL_QTY & r).Value2)
+End Function
 
-    v = ws.Range(COL_QTY & r).Value2
+'  оличество из значени€ €чейки столбца D. –азбор общий с D18 и €чейками
+' сигналов: IsNumeric -> CDbl, иначе „исло»з“екста, дробь режетс€ Fix,
+' диапазон ограничен MAX_LONG. ќшибка €чейки, пуста€ €чейка и булево дают
+' 0 Ч строка не участвует. ќтрицательное количество Ч тоже 0.
+' ¬ыделено из „итать ол, чтобы самопроверка в Excel гон€ла те же векторы,
+' что tools/parse-spec.py, не трога€ лист.
+Private Function  ол»з«начени€(ByVal v As Variant) As Long
+     ол»з«начени€ = »звлечь„исло(v)
 
-    If IsError(v) Then Exit Function
-    If IsEmpty(v) Then Exit Function
-
-    ' Ќечисловой текст разбираетс€ „исло»з“екста;
-    ' сам факт разбора отмечает ѕроверитьячейку ол.
-    If IsNumeric(v) Then
-        d = Int(CDbl(v))
-    Else
-        d = Int(„исло»з“екста(CStr(v)))
-    End If
-
-    If d < 0 Then d = 0
-    If d > MAX_LONG Then d = MAX_LONG
-
-    „итать ол = CLng(d)
+    If  ол»з«начени€ < 0 Then  ол»з«начени€ = 0
 End Function
 
 ' —толбец D об€зан содержать число. ≈сли там текст, количество берЄтс€ из
@@ -3304,6 +3296,54 @@ Private Sub «аписать„ислоЎкафов(ByVal ws As Worksheet, ByVal n As Long)
             "); шкафов по раскладке: " & n & "."
     End If
 End Sub
+
+' –езерв D19: дол€ свободного места на рейке. „исло > 1 Ч проценты
+' (20 -> 0.2), <= 1 Ч дол€ (0.2 -> 0.2). ѕоэтому 1 Ч это 100 %, а не 1 %:
+' и числом, и текстом (Ђ1 %ї) даЄт 0.9 после ограничени€; 1 % задаЄтс€
+' только долей 0.01. ќтрицательное -> 0, всЄ >= 90 % -> 0.9 (clamped).
+' wasText Ч значение было непустым нечисловым текстом (вызывающий предупреждает).
+' ¬ыделено из —оздать онфигуратор, чтобы правило гон€лось векторами в Excel
+' и в tools/parse-spec.py: поведение здесь намеренно сохранено, а не Ђисправленої.
+Private Function –езервƒол€(ByVal v As Variant, _
+    ByRef wasText As Boolean, ByRef clamped As Boolean, _
+    ByRef wasOne As Boolean) As Double
+
+    Dim fv As Double
+    Dim t As String
+
+    fv = 0
+    wasText = False
+    clamped = False
+    wasOne = False
+
+    If Not IsError(v) And Not IsEmpty(v) Then
+        If IsNumeric(v) Then
+            fv = CDbl(v)
+        Else
+            t = Trim$(CStr(v))
+            wasText = Len(t) > 0
+            If wasText Then fv = „исло»з“екста(t)
+        End If
+    End If
+
+    If fv > 1 Then
+        –езервƒол€ = fv / 100#
+    Else
+        –езервƒол€ = fv
+    End If
+
+    If –езервƒол€ < 0 Then –езервƒол€ = 0
+
+    If –езервƒол€ >= 0.9 Then
+        –езервƒол€ = 0.9
+        clamped = True
+    End If
+
+    ' –овно единица Ч сама€ часта€ ошибка ввода: имели в виду 1 %, а по
+    ' правилу D19 это 100 %. ќтдельный признак, чтобы предупреждение
+    ' назвало причину, а не только следствие (Ђограничен 90 %ї).
+    wasOne = Abs(fv - 1) < PLAN_EPS
+End Function
 
 Private Function „итать„исло( _
     ByVal ws As Worksheet, ByVal addr As String) As Double
@@ -3570,6 +3610,38 @@ Private Sub “ест–азбора„исел()
     “ест÷елого "1 500", 1500, n, bad
     “ест÷елого "нет", 0, n, bad
     “ест÷елого "", 0, n, bad
+    ' float() берЄт "nan"/"1_000", IsNumeric Ч нет: разбор идЄт текстом.
+    “ест÷елого "nan", 0, n, bad
+    “ест÷елого "1_000", 1, n, bad
+
+    '  ол»з«начени€: количество столбца D, отрицательное -> 0.
+    “ест оличества "4", 4, n, bad
+    “ест оличества "0", 0, n, bad
+    “ест оличества "-1", 0, n, bad
+    “ест оличества "-500", 0, n, bad
+    “ест оличества "нет", 0, n, bad
+    “ест оличества "", 0, n, bad
+    “ест оличества "5 шт", 5, n, bad
+    “ест оличества "1_000", 1, n, bad
+    “ест оличества "99999999999", MAX_LONG, n, bad
+    “ест оличества ChrW(160) & "5", 5, n, bad
+
+    ' –езервƒол€: правило D19 Ч дол€ и три признака (текст, ограничен,
+    ' единица). Ђ1ї и Ђ1 %ї Ч 100 %, а не 1 %. ѕор€док: дол€, текст,
+    ' ограничен, единица.
+    “ест–езерва "1", 0.9, False, True, True, n, bad
+    “ест–езерва "0", 0, False, False, False, n, bad
+    “ест–езерва "20", 0.2, False, False, False, n, bad
+    “ест–езерва "90", 0.9, False, True, False, n, bad
+    “ест–езерва "91", 0.9, False, True, False, n, bad
+    “ест–езерва "100", 0.9, False, True, False, n, bad
+    “ест–езерва "150", 0.9, False, True, False, n, bad
+    “ест–езерва "-5", 0, False, False, False, n, bad
+    “ест–езерва "1 %", 0.9, True, True, True, n, bad
+    “ест–езерва "20 %", 0.2, True, False, False, n, bad
+    “ест–езерва "нет", 0, True, False, False, n, bad
+    “ест–езерва "", 0, False, False, False, n, bad
+    “ест–езерва ChrW(160) & "5", 0.05, True, False, False, n, bad
 
     If Len(bad) = 0 Then
         MsgBox "–азбор чисел: " & n & " векторов, расхождений нет.", _
@@ -3615,10 +3687,49 @@ Private Sub “ест÷елого(ByVal s As String, ByVal want As Double, _
     End If
 End Sub
 
+Private Sub “ест оличества(ByVal s As String, ByVal want As Double, _
+                           ByRef n As Long, ByRef bad As String)
+    Dim got As Long
+
+    n = n + 1
+    got =  ол»з«начени€(s)
+
+    If got <> want Then
+        bad = bad & vbCrLf & "   ол»з«начени€(""" & s & """) = " & got & _
+              ", ожидалось " & want
+    End If
+End Sub
+
+Private Sub “ест–езерва(ByVal s As String, ByVal want As Double, _
+                        ByVal wantText As Boolean, _
+                        ByVal wantClamped As Boolean, _
+                        ByVal wantOne As Boolean, _
+                        ByRef n As Long, ByRef bad As String)
+    Dim got As Double
+    Dim wasText As Boolean
+    Dim clamped As Boolean
+    Dim wasOne As Boolean
+
+    n = n + 1
+    got = –езервƒол€(s, wasText, clamped, wasOne)
+
+    If Abs(got - want) > 0.000000001 Then
+        bad = bad & vbCrLf & "  –езервƒол€(""" & s & """) = " & got & _
+              ", ожидалось " & want
+    End If
+
+    If wasText <> wantText Or clamped <> wantClamped Or wasOne <> wantOne Then
+        bad = bad & vbCrLf & "  –езервƒол€(""" & s & """) признаки: текст=" & _
+              wasText & ", ограничен=" & clamped & ", единица=" & wasOne & _
+              "; ожидалось текст=" & wantText & ", ограничен=" & wantClamped & _
+              ", единица=" & wantOne
+    End If
+End Sub
+
 '=============================================================================
 ' ќ“–»—ќ¬ ј
 '=============================================================================
-
+
 Private Sub Ќарисовать–асположение( _
     ByVal wl As Worksheet, _
     ByRef legName() As String, ByRef legLen() As Double, _
@@ -3659,7 +3770,6 @@ Private Sub Ќарисовать–асположение( _
     Dim kindC As String
     Dim txtCol As Long
     Dim rb As Shape
-    Dim msh As Shape
 
     ' ћасштаб отрисовки об€зан быть согласован с высотой верхней зоны:
     ' CTRL_ZONE_MM мм при MM px/мм дают ровно CTRL_OFFSET_PX пикселей, иначе
@@ -3842,11 +3952,10 @@ Private Sub Ќарисовать–асположение( _
 
             modH = mLen(idx) * MM
 
-            Set msh = ƒоб–ект( _
-                wl, railX(rr) + 1, _
+            ƒоб–ект wl, railX(rr) + 1, _
                 TOPY + yOff + mPos(idx) * MM, _
                 RAILW - 2, modH, mColor(idx), _
-                RGB(60, 60, 60), 0.25)
+                RGB(60, 60, 60), 0.25
 
             If modH >= 13 Then
                 txtCol = “екст÷вет(mColor(idx))

@@ -5,7 +5,8 @@
 Зеркало планировщика из `Module1.bas`: `TryPlanBlocks`, `SearchBlocks`
 (включая отсечение симметрии одинаковых по ширине блоков и дедупликацию
 реек с равным свободным местом), `TryPlaceGroupInCab`,
-`TryPlacePartialSplit` (фазы 1 и 2), `CommitPlan` и
+`TryPlacePartialSplit` (фазы 1 и 2; фаза 2 начинает со второго блока — её
+первый вариант повторял бы первый вариант фазы 1), `CommitPlan` и
 `РазместитьСвязкуНаСвободнойРейке` (этап 1.1, шкаф P410). Порядок обхода,
 сортировка блоков по убыванию и выбор реек повторяют VBA; размещение
 фиксируется только после успешной укладки всей группы (как `CommitPlan`),
@@ -20,6 +21,10 @@
 канонические сценарии, проверка инвариантов (нет переполнения рейки, все
 элементы размещены, связка не рвётся между шкафами) и рандомизированные
 прогоны с фиксированным seed со сверкой с брутфорсом на малых задачах.
+Прогонов два: круглые ширины (равные остатки реек — проверка дедупликации
+в SearchBlocks) и настоящие ширины модулей (13, 23, 157, …). Каждый
+прогон проверяет и то, что он не выродился: лимит перебора не достигнут
+(иначе сравнивать с брутфорсом нечего) и есть как укладки, так и отказы.
 
 МЕНЯЕШЬ АЛГОРИТМ В VBA — МЕНЯЙ ЭТОТ ФАЙЛ. Автоматической сверки нет:
 зеркало переводится из VBA вручную, расхождение смотрит человек.
@@ -29,6 +34,7 @@
 
 import random
 import sys
+import time
 
 EPS = 0.0001            # PLAN_EPS
 NODE_LIMIT = 300000     # PLAN_NODE_LIMIT
@@ -36,12 +42,19 @@ SEARCH_BLOCK_LIMIT = 120  # PLAN_SEARCH_BLOCK_LIMIT
 
 
 class Budget:
-    """Сквозной счётчик узлов перебора на одну попытку группы."""
+    """Сквозной счётчик узлов перебора на одну попытку группы.
+
+    search_calls / plan_calls / variants — инструменты проверки, а не
+    состояние VBA: по ним видно, сколько поисков потрачено и не пробовался
+    ли один и тот же набор блоков дважды.
+    """
 
     def __init__(self, limit=NODE_LIMIT):
         self.limit = limit
         self.nodes = 0
         self.search_calls = 0
+        self.plan_calls = 0
+        self.variants = []
 
 
 class Rails:
@@ -111,6 +124,8 @@ def search_blocks(level, n_blk, order, blk_len, rail_ids, free_cap,
 
 def try_plan_blocks(rails, lens, cab_id, kind, items, blocks, budget):
     """(plan|None, hit_limit). items/blocks — параллельные списки элементов."""
+    budget.plan_calls += 1
+    budget.variants.append(tuple(blocks))
     n_blk = max(blocks) + 1 if blocks else 0
     blk_len = [0.0] * n_blk
     total = 0.0
@@ -193,7 +208,7 @@ def try_place_partial_split(rails, lens, placed_rail, cab_id, kind,
     for phase in (1, 2):
         done = [False] * n_blk
         tried = [False] * n_blk
-        for _ in range(n_blk):
+        for n_try in range(n_blk):
             best = -1
             for blk in range(n_blk):
                 if blk_cnt[blk] > 1 and not tried[blk]:
@@ -205,6 +220,12 @@ def try_place_partial_split(rails, lens, placed_rail, cab_id, kind,
             if phase == 1:
                 done = [False] * n_blk
             done[best] = True
+
+            # Фаза 2, шаг 1 — тот же вариант, что шаг 1 фазы 1 (раздроблен
+            # только самый широкий блок). Повтор тратит сквозной бюджет
+            # узлов, не меняя исход: фаза 2 начинается со второго блока.
+            if phase == 2 and n_try == 0:
+                continue
 
             blk_map = {}
             nxt = 0
@@ -288,8 +309,23 @@ def place_bundle_on_free_rail(rails, lens, placed_rail, cab_id, kind, items):
 # ---------------------------------------------------------------------------
 
 def brute_force(lengths, caps):
-    """Можно ли разложить неделимые куски lengths по рейкам caps."""
+    """Можно ли разложить неделимые куски lengths по рейкам caps.
+
+    Сначала дешёвый отказ: не хватает суммарной ёмкости или самый длинный
+    кусок длиннее самой длинной рейки. Без этого заведомо невозможная
+    задача обходила всё дерево — при 16 элементах и четырёх рейках это
+    самая дорогая ветка перебора.
+
+    Допуск суммы — EPS на элемент, а не один EPS: go() прощает до EPS на
+    каждое размещение, поэтому одиночный допуск отсекал бы укладки,
+    которые перебор считает возможными. С множителем условие строго
+    слабее перебора и ответ не меняет.
+    """
     lengths = sorted(lengths, reverse=True)
+    if sum(lengths) > sum(caps) + EPS * max(1, len(lengths)):
+        return False
+    if lengths and lengths[0] > max(caps, default=0) + EPS:
+        return False
     free = list(caps)
 
     def go(k):
@@ -342,10 +378,16 @@ def check(name, cond, detail=""):
         FAIL.append(name)
 
 
-def intact_bundles(blocks, items, placed_rail):
-    """Сколько блоков лежат целиком на одной рейке."""
+def intact_bundles(blocks, items, placed_rail, skip=()):
+    """Сколько блоков лежат целиком на одной рейке (кроме блоков из skip).
+
+    skip — блоки, которые не считаются связками: в сценарии DIO блок 0 —
+    сам модуль DIO, он всегда целый и в счёт «7 из 8 связок» не входит.
+    """
     by_block = {}
     for idx, blk in zip(items, blocks):
+        if blk in skip:
+            continue
         by_block.setdefault(blk, set()).add(placed_rail[idx])
     return sum(1 for rs in by_block.values() if len(rs) == 1)
 
@@ -393,10 +435,7 @@ def scenario_dio_seven_of_eight():
     check("DIO 7/8: неудача не меняет состояние", rails.snapshot() == before)
     res = try_place_group_in_cab(rails, lens, placed, 1, "M", items, blocks)
     check("DIO 7/8: группа размещена с дроблением", res["ok"] and res["was_split"])
-    bundle_blocks = {b for b in blocks if b > 0}
-    intact_b = sum(1 for b in bundle_blocks
-                   if len({placed[i] for i, bb in zip(items, blocks)
-                           if bb == b}) == 1)
+    intact_b = intact_bundles(blocks, items, placed, skip={0})
     check("DIO 7/8: целы 7 из 8 связок", intact_b == 7, f"целы {intact_b}")
     probs = check_invariants("DIO", rails, lens, placed, [(items, 1)])
     check("DIO 7/8: инварианты", not probs, "; ".join(probs))
@@ -440,6 +479,52 @@ def scenario_tight_cabinet():
     check("Тесный шкаф: состояние не изменено", rails2.snapshot() == before)
 
 
+def scenario_phase2_no_repeat():
+    """Фаза 2 не повторяет первый вариант фазы 1.
+
+    Блоки 110 (70+40), 80 (50+30) и 10 на двух рейках по 100: целыми не
+    встают, фаза 1 дробит по очереди каждый составной блок, фаза 2 раньше
+    начиналась с того же самого широкого блока — тот же набор, тот же
+    отказ, но узлы сквозного бюджета потрачены. Итог укладки при этом не
+    менялся: группу кладёт фоллбэк на отдельные элементы.
+    """
+    rails = Rails([(1, "M", 100), (1, "M", 100)])
+    lens = [70.0, 40.0, 50.0, 30.0, 10.0]
+    items, blocks = list(range(5)), [0, 0, 1, 1, 2]
+    placed, budget = {}, Budget()
+    res = try_place_group_in_cab(rails, lens, placed, 1, "M", items, blocks,
+                                 budget=budget)
+    check("Фаза 2: группа размещена", res["ok"])
+    dup = len(budget.variants) - len(set(budget.variants))
+    check("Фаза 2: один и тот же набор блоков не пробуется дважды", dup == 0,
+          f"повторов {dup}: {budget.variants}")
+    probs = check_invariants("Фаза 2", rails, lens, placed, [(items, 1)])
+    check("Фаза 2: инварианты", not probs, "; ".join(probs))
+    print(f"     (вызовов TryPlanBlocks {budget.plan_calls}, "
+          f"узлов {budget.nodes})")
+
+
+def scenario_budget_not_wasted():
+    """Повтор фазы 2 не превращает решаемую задачу в ошибку 44/46.
+
+    Задача с урезанным бюджетом (60 узлов): укладка существует, и её хватает
+    бюджета — но прежде фаза 2 первым делом повторяла вариант фазы 1, поиск
+    упирался в лимит, и вызывающий получал hitLimit («предел поиска»,
+    ошибки 44/46) вместо укладки.
+    """
+    rails = Rails([(1, "M", 120), (1, "M", 120), (1, "M", 160), (1, "M", 200)])
+    lens = [35.0, 67.0, 100.0, 100.0, 23.0, 67.0, 13.0, 100.0, 67.0]
+    items, blocks = list(range(9)), [0, 0, 0, 1, 1, 2, 2, 3, 3]
+    placed, budget = {}, Budget(limit=60)
+    res = try_place_group_in_cab(rails, lens, placed, 1, "M", items, blocks,
+                                 budget=budget)
+    check("Бюджет не растрачен: решаемая задача уложена", res["ok"],
+          f"узлов {budget.nodes} из {budget.limit}")
+    check("Бюджет не растрачен: предел поиска не взведён", not res["hit_limit"])
+    probs = check_invariants("Бюджет 60", rails, lens, placed, [(items, 1)])
+    check("Бюджет не растрачен: инварианты", not probs, "; ".join(probs))
+
+
 def scenario_shared_budget():
     """Сквозной бюджет: суммарно узлов не больше лимита + по одному
     «лишнему» узлу на вызов SearchBlocks, а hit_limit взведён."""
@@ -454,9 +539,10 @@ def scenario_shared_budget():
     res = try_place_group_in_cab(rails, lens, {}, 1, "M", items, blocks,
                                  budget=budget)
     check("Бюджет: поиск упёрся в лимит", res["hit_limit"])
-    check("Бюджет: счётчик сквозной, а не на вызов",
-          budget.nodes > budget.limit)
-    check("Бюджет: превышение не больше числа поисков",
+    # Сам по себе «nodes > limit» ничего не доказывает: счётчик на вызов
+    # тоже его превысит. Сквозной бюджет доказывает следующая проверка.
+    check("Бюджет: лимит взведён", budget.nodes > budget.limit)
+    check("Бюджет: счётчик сквозной — превышение не больше числа поисков",
           budget.nodes <= budget.limit + budget.search_calls,
           f"nodes={budget.nodes} calls={budget.search_calls}")
 
@@ -465,21 +551,32 @@ def scenario_shared_budget():
 # Рандом со сверкой с брутфорсом.
 # ---------------------------------------------------------------------------
 
-def randomized(trials=600, seed=20261015):
+def randomized(trials=600, seed=20261015, caps_pool=(80, 100, 120),
+               used_pool=(0, 0, 20), widths=(10, 20, 30, 40, 50),
+               max_blk=6, max_per_blk=3, label=""):
+    """Рандом со сверкой с брутфорсом.
+
+    Ширины по умолчанию круглые и кратны 10 — так часто выходит равное
+    свободное место (проверка дедупликации реек в SearchBlocks). Второй
+    прогон в main() берёт настоящие ширины модулей (13, 23, 157, …), где
+    равных остатков почти не бывает.
+    """
     rng = random.Random(seed)
+    tag = f"{label} " if label else ""
     mism_plan = mism_group = state_dirty = inv_fail = 0
     skipped_limit = 0
+    placed_ok = placed_no = 0
     for t in range(trials):
         n_rails = rng.randint(1, 4)
-        caps = [float(rng.choice([80, 100, 120])) for _ in range(n_rails)]
-        used = [float(rng.choice([0, 0, 20])) for _ in range(n_rails)]
-        n_blk = rng.randint(1, 6)
+        caps = [float(rng.choice(caps_pool)) for _ in range(n_rails)]
+        used = [float(rng.choice(used_pool)) for _ in range(n_rails)]
+        n_blk = rng.randint(1, max_blk)
         lens, items, blocks = [], [], []
         for b in range(n_blk):
-            for _ in range(rng.randint(1, 3)):
+            for _ in range(rng.randint(1, max_per_blk)):
                 items.append(len(lens))
                 blocks.append(b)
-                lens.append(float(rng.choice([10, 20, 30, 40, 50])))
+                lens.append(float(rng.choice(widths)))
         free = [c - u for c, u in zip(caps, used)]
 
         # Целые блоки против брутфорса.
@@ -508,21 +605,34 @@ def randomized(trials=600, seed=20261015):
         elif res["ok"] != brute_force(lens, free):
             mism_group += 1
         if res["ok"]:
+            placed_ok += 1
             probs = check_invariants(f"rand{t}", rails, lens, placed,
                                      [(items, 1)])
             if probs:
                 inv_fail += 1
-        elif rails.snapshot() != before or placed:
-            state_dirty += 1
-    check(f"Рандом ({trials}, seed={seed}): целые блоки == брутфорс",
+        else:
+            placed_no += 1
+            if rails.snapshot() != before or placed:
+                state_dirty += 1
+    check(f"{tag}Рандом ({trials}, seed={seed}): целые блоки == брутфорс",
           mism_plan == 0, f"расхождений {mism_plan}")
-    check("Рандом: группа с дроблением == брутфорс по элементам",
+    check(f"{tag}Рандом: группа с дроблением == брутфорс по элементам",
           mism_group == 0, f"расхождений {mism_group}")
-    check("Рандом: неудача не пачкает состояние", state_dirty == 0,
+    check(f"{tag}Рандом: неудача не пачкает состояние", state_dirty == 0,
           f"случаев {state_dirty}")
-    check("Рандом: инварианты при успехе", inv_fail == 0,
+    check(f"{tag}Рандом: инварианты при успехе", inv_fail == 0,
           f"случаев {inv_fail}")
-    print(f"     (пропущено из-за лимита перебора: {skipped_limit})")
+    # Прогон, в котором каждая задача упёрлась в лимит перебора, зелёный
+    # пустой проверкой: сравнивать с брутфорсом было нечего. Задачи здесь
+    # малы, лимит недостижим — если он всё-таки взведён, чинить генератор.
+    check(f"{tag}Рандом: лимит перебора не достигнут", skipped_limit == 0,
+          f"пропущено {skipped_limit}")
+    # Второй способ выродиться — все задачи одного исхода.
+    check(f"{tag}Рандом: есть и укладки, и отказы",
+          placed_ok > 0 and placed_no > 0,
+          f"уложено {placed_ok}, отказов {placed_no}")
+    print(f"     (уложено {placed_ok}, отказов {placed_no}, "
+          f"пропущено из-за лимита перебора: {skipped_limit})")
 
 
 def main():
@@ -530,8 +640,27 @@ def main():
     scenario_dio_seven_of_eight()
     scenario_bundle_wider_than_rail()
     scenario_tight_cabinet()
+    scenario_phase2_no_repeat()
+    scenario_budget_not_wasted()
     scenario_shared_budget()
+    # Время прогона печатается: рандом сверяется с брутфорсом, а тот на
+    # невозможных задачах экспоненциален. Дешёвый отказ в brute_force
+    # снимает часть таких случаев, но не все (бывает, что сумма влезает,
+    # а укладки всё равно нет) — рост времени должен быть виден в логе CI,
+    # а не обнаруживаться через полгода.
+    t0 = time.perf_counter()
     randomized()
+    t1 = time.perf_counter()
+    print(f"     (время прогона {t1 - t0:.2f} s)")
+    # Второй прогон: настоящие ширины модулей и барьеров (defLensFallback),
+    # до 8 блоков — остатки реек почти никогда не равны, дедупликация
+    # SearchBlocks не помогает и перебор идёт шире. Ёмкости подобраны так,
+    # чтобы задачи были пограничными: и целые блоки не влезают, и дробление
+    # срабатывает (иначе прогон вырождается в одни отказы или одни укладки).
+    randomized(trials=400, seed=20261103, caps_pool=(200, 260, 320),
+               used_pool=(0, 0, 23), widths=(13, 23, 35, 67, 100, 110, 157, 164),
+               max_blk=8, max_per_blk=2, label="Неровные ширины:")
+    print(f"     (время прогона {time.perf_counter() - t1:.2f} s)")
     if FAIL:
         print(f"\nрасхождений: {len(FAIL)}")
         return 1

@@ -9,36 +9,67 @@ vba-lint.py — статическая проверка VBA-модуля (Module
   E01 кодировка: файл должен декодироваться в Windows-1251 и round-trip'иться
   E02 окончания строк: только CRLF, файл обязан заканчиваться переводом строки
   E03 несбалансированные блоки (If/ElseIf/End If, For/Next, Do/Loop, With,
-      Select Case/End Select, While/Wend, Type/End Type) в пределах процедуры
+      Select Case/End Select, While/Wend) в пределах процедуры и
+      Type/End Type, Enum/End Enum на уровне модуля
   E04 скобки и кавычки в логической строке (с учётом переносов «_»)
   E05 висячее продолжение строки («_» в конце файла или перед комментарием)
   E06 отсутствие Option Explicit
   E07 дублирующиеся имена процедур (в VBA: «Ambiguous name detected»)
   E08 идентификатор не объявлен (при Option Explicit это ошибка компиляции)
-  E09 вызов несуществующей процедуры
+  E09 Call <имя> — такой процедуры нет. Только явный Call: голые вызовы
+      (обычный стиль этого модуля) покрыты E08 — имя в них проверяется как
+      любой идентификатор, — и E21/E22 по сигнатуре
   E10 On Error GoTo <метка> — метка не найдена в этой процедуре
   E11 On Error Resume Next не закрыт до конца процедуры
   E12 функция нигде не присваивает имя себе (вернёт Empty/0/«»)
   E13 дублирующийся номер ошибки в Err.Raise vbObjectError + N
   E14 дубликат метки Case в одном Select Case
   E15 ReDim X(1 To N) с явной нулевой/отрицательной границей (Runtime error 9)
-  E16 строка кода внутри процедуры на нулевом отступе (потерян отступ)
+  E16 строка кода внутри процедуры на нулевом отступе (потерян отступ);
+      процедуры берутся из разбора модуля, многострочные сигнатуры учтены
   E17 строка начинается с бинарного оператора, а предыдущая не продолжена «_»
-  E18 ссылка на несуществующую процедуру (вызов с аргументами или «Голый»
-      вызов строки) — ловит и случайно закомментированное определение
       (разорванное выражение — VBA: Compile error: Expected: expression)
+  E18 снят: дубль E08 (E08 сверяет каждое имя со списком своей процедуры,
+      E18 — с объединением списков всех процедур, то есть строго слабее).
+      Номер зарезервирован, чтобы не переиспользовать его в чужих ссылках.
+  E19 комментарий кончается на « _» — VBA продолжает комментарий, и следующая
+      строка молча становится комментарием
+  E20 больше 24 продолжений «_» в одной логической строке
+      (VBA: Too many line continuations)
+  E21 неверное число аргументов в вызове процедуры модуля — голым вызовом,
+      в скобках или через Call; Optional и ParamArray учтены.
+      «Имя (a), b» — голый вызов с двумя аргументами, а не с одним; имя,
+      объявленное в самой процедуре, затеняет процедуру и не проверяется
+      (VBA: Argument not optional / Wrong number of arguments)
+  E22 именованный аргумент, которого нет в сигнатуре процедуры модуля
+      (VBA: Named argument not found)
+  E23 тип в «As <Тип>» не известен — ни встроенный (TYPES), ни объектный
+      (OBJECT_TYPES), ни объявленный в модуле. Квалификатор библиотеки
+      («Excel.Worksheet», «Scripting.Dictionary») отбрасывается: тип —
+      последняя часть. Имена функций типами не считаются, поэтому «As Left»
+      — ошибка (VBA: User-defined type not defined)
 
 Предупреждения (код возврата не меняют):
   W01 табуляция вместо пробелов
   W02 хвостовые пробелы
   W03 строка длиннее MAX_LINE
-  W04 неиспользуемый параметр/локальная переменная
+  W04 неиспользуемый параметр/локальная переменная; инициализатор другой
+      константы («Const B = A * 2») считается использованием A
   W05 метка, на которую нет переходов
+  W06 Private-объявление уровня модуля нигде не используется (Public/Friend
+      может использовать другой модуль проекта — не проверяется). Все имена
+      перечисления («Private a As Long, b As Long») проверяются по отдельности
 
 Использование:
     python3 tools/vba-lint.py [файл.bas ...]
 Без аргументов — все *.bas/*.cls репозитория (обход без .git). Код возврата:
 1, если есть ошибки E*; предупреждения (W*) его не меняют.
+
+Перед обходом файлов линтер гоняет самопроверку правил (SELFTEST ниже):
+каждое правило обязано сработать на своём примере и промолчать на законном
+коде. Правило, которое молча не срабатывает, даёт зелёный вывод без
+проверки — это ловится здесь, а не в разборе чужого модуля. Расхождение
+самопроверки — тоже код возврата 1.
 
 E08 опирается на списки встроенных имён VBA/Office ниже (KEYWORDS, BUILTINS,
 CONSTANTS, TYPES). При легитимном ложном срабатывании — добавьте имя в нужный
@@ -52,10 +83,15 @@ import collections
 
 MAX_LINE = 100
 ENCODING = "cp1251"
+# Предел VBA на одну логическую строку («Too many line continuations»).
+MAX_CONTINUATIONS = 24
 
 # ---------------------------------------------------------------------------
 # Встроенные имена VBA / Excel / Office (не требуют объявления)
 # ---------------------------------------------------------------------------
+# Только существующие имена: выдуманное имя в списке — это молча выключенная
+# проверка E08 для опечатки в коде. Легитимное ложное срабатывание — имя
+# добавляется сюда тем же коммитом, что и правка модуля.
 KEYWORDS = set("""
 addressof alias attribute byref byval call case const declare default delete
 dim do each else elseif end enum erase error event exit false for friend
@@ -69,11 +105,11 @@ nothing next loop step error basic vba
 BUILTINS = set("""
 abs access application array atn cbool cbyte ccur cdate cdbl cdec cint clng
 clnglng clngptr cmdialog cobj cos csng cstr cvar date dateserial dateadd
-datediff datepart datevalue day debug dir division exp fix format hex int
+datediff datepart datevalue day debug dir exp fix format hex int
 isempty iserror isnull isnumeric isarray isobject isdate ismissing vartype lcase left
 len lbound lcase loc lof ltrim mid minute month monthname now oct right rnd
 round sgn second split sqr str strconv tan time timer timeserial
-timevalue trim typename ucase ubound val variant weekday weekyear year
+timevalue trim typename ucase ubound val variant weekday year
 instr instrrev replace lcase ucase strcomp strconv filter join
 thisworkbook workbook workbooks worksheet worksheets range ranges cells shape
 shapes sheets columns rows selection activewindow windows application screen
@@ -81,9 +117,9 @@ font fill line shadow textframe textframe2 textrange paragraphformat
 addshape addtextbox msofadeclear nothing
 msgbox inputbox createobject getobject copyfile kill name chdir mkdir rmdir
 filedatetime filesize freefile open close print input lock unlock seek eof
-beep randomize sleep
-err rgb iif chrw ascw curdir envar formatcurrency formatdatetime
-isarray objecterror createline rangefromnotification
+beep randomize
+err rgb iif chrw ascw curdir formatcurrency formatdatetime
+isarray
 """.split())
 
 CONSTANTS = set("""
@@ -103,7 +139,20 @@ xlcalculationautomatic xlcalculationmanual xlcalculationsemiautomatic
 
 TYPES = set("""
 long integer double single string boolean variant object byte currency
-decimal date datevariant autocolor collection
+decimal date collection
+""".split())
+
+# Объектные типы — отдельно от BUILTINS. Раньше E23 считал известным типом
+# всё из BUILTINS, а там имена функций и свойств: «As Left» проходило.
+# Библиотечные имена (Excel.Worksheet, Scripting.Dictionary) разбираются
+# с квалификатором, поэтому префикс в список не входит.
+OBJECT_TYPES = set("""
+worksheet worksheets workbook workbooks sheet sheets range ranges
+shape shapes chart charts name names window windows application
+font fillformat lineformat shadowformat textframe textframe2 textrange
+paragraphformat cellformat borders interior comment hyperlink
+dictionary filesystemobject textstream file folder drive
+regexp matchcollection match submatches collection
 """.split())
 
 # ---------------------------------------------------------------------------
@@ -154,6 +203,17 @@ def split_top(text, sep=","):
     return [p.strip() for p in parts if p.strip()]
 
 
+# Продолжение — это «_» в конце строки кода, отделённое пробелом (или
+# единственное на строке): `x = 1 + _`. Хвост `foo_` — часть идентификатора,
+# а не перенос, поэтому endswith("_") здесь не годится.
+CONT_RE = re.compile(r"(?:^|\s)_$")
+
+
+def is_continued(code):
+    """Строка кода (уже без комментария) продолжается на следующей строке."""
+    return bool(CONT_RE.search(code.rstrip()))
+
+
 def build_logical(raw_lines):
     """Склеить строки с продолжением «_». Возвращает [(номер, текст, физ.строки)]."""
     logical = []
@@ -165,7 +225,7 @@ def build_logical(raw_lines):
         if start is None:
             start = n
         span.append(n)
-        if code.endswith("_") and code.count('"') % 2 == 0:
+        if is_continued(code) and code.count('"') % 2 == 0:
             buf += " " + code[:-1].strip()
             continue
         buf += " " + code
@@ -178,9 +238,13 @@ def build_logical(raw_lines):
     return logical
 
 
+# «Static Sub» и «Public Static Sub» — тоже начало процедуры. Закрывающая
+# скобка списка параметров ищется по балансу (match_paren), а не жадным
+# «\(.*\)»: иначе у «Function X(a As Long) As Long()» в список параметров
+# попадало «(a As Long) As Long()» и тип результата терялся.
 PROC_START = re.compile(
-    r"^\s*(public |private |friend )?(sub|function|property (?:get|let|set))"
-    r"\s+([^\s(]+)(\(.*\))?\s*(as\s+\w+)?\s*$",
+    r"^\s*((?:(?:public|private|friend|static)\s+)*)(sub|function|property (?:get|let|set))"
+    r"\s+([^\s(]+)",
     re.I,
 )
 PROC_END = re.compile(r"^\s*end (sub|function|property)\b", re.I)
@@ -196,11 +260,22 @@ def parse_procedures(logical):
         if cur is None:
             m = PROC_START.match(text)
             if m:
+                rest = text[m.end():]
+                sig, ret = "", rest.strip().lower()
+                stripped = rest.lstrip()
+                if stripped.startswith("("):
+                    open_idx = m.end() + len(rest) - len(stripped)
+                    close = match_paren(text, open_idx)
+                    if close < 0:
+                        sig = stripped          # незакрытую скобку поймает E04
+                    else:
+                        sig = text[open_idx:close + 1]
+                        ret = text[close + 1:].strip().lower()
                 cur = {
                     "kind": m.group(2).lower().split()[0],
                     "name": m.group(3),
-                    "sig": m.group(4) or "",
-                    "ret": (m.group(5) or "").strip().lower(),
+                    "sig": sig,
+                    "ret": ret,
                     "start": no,
                     "body": [],
                     "span": span,
@@ -221,19 +296,51 @@ def parse_procedures(logical):
     return procs, module
 
 
-def collect_decls(procs, module):
-    """Имена, объявленные на уровне модуля."""
-    mod_names = set()
-    for no, text, _ in module:
-        low = text.lower()
-        m = re.match(
-            r"^\s*(private|public|friend)\s+(?:const|dim|static)?\s*(?:withevents\s+)?"
-            r"(%s)" % NAME_RE,
-            low,
-        )
+def module_level(module):
+    """Уровень модуля: объявления, имена Type/Enum и члены Enum.
+
+    Возвращает ({имя: (строка, видимость, имя как записано)}, типы,
+    члены_enum). Внутри
+    Type/Enum объявления — поля и члены, а не переменные модуля: поле
+    доступно только через точку, член Enum — по имени (иначе E08 считал бы
+    его необъявленным).
+    """
+    names, types, members = {}, set(), set()
+    inside = None
+    for no, text, _span in module:
+        low = text.strip().lower()
+        m = re.match(r"^(?:public\s+|private\s+)?(type|enum)\s+(%s)" % NAME_RE, low)
         if m:
-            mod_names.add(m.group(2))
-    return mod_names
+            inside = m.group(1)
+            types.add(m.group(2))
+            continue
+        if re.match(r"^end (type|enum)\b", low):
+            inside = None
+            continue
+        if inside == "enum":
+            m = re.match(r"^(%s)\s*(?:=|$)" % NAME_RE, low)
+            if m:
+                members.add(m.group(1))
+            continue
+        if inside:
+            continue
+        m = re.match(
+            r"^(private|public|friend)\s+(?:const\s+|dim\s+|static\s+)?"
+            r"(?:withevents\s+)?(.*)$", text.strip(), re.I | re.S)
+        if m:
+            # «Private a As Long, b As Long» объявляет и b: имена идут через
+            # запятую верхнего уровня, как в declared_in_proc.
+            for part in split_top(m.group(2)):
+                nm = re.match(r"(%s)" % NAME_RE, part)
+                if nm:
+                    names[nm.group(1).lower()] = (no, m.group(1).lower(),
+                                                  nm.group(1))
+    return names, types, members
+
+
+def collect_decls(procs, module):
+    """Имена, объявленные на уровне модуля (без полей Type и членов Enum)."""
+    return set(module_level(module)[0])
 
 
 def declared_in_proc(proc):
@@ -250,7 +357,7 @@ def declared_in_proc(proc):
                 names.add(m.group(1))
     for no, text, _ in proc["body"]:
         low = text.lower()
-        if re.match(r"^\s*(dim|static|const)\b", low):
+        if DECL.match(low):
             body = re.sub(r"^\s*(dim|static|const)\s+(withevents\s+)?(const\s+)?", "", low)
             for part in split_top(body):
                 m = re.match(r"(%s)" % NAME_RE, part)
@@ -258,6 +365,115 @@ def declared_in_proc(proc):
                     names.add(m.group(1))
         # For / For Each счётчик обязан быть объявлен, но соберём для точности
     return names
+
+
+def proc_signature(proc):
+    """Параметры процедуры: имена, число обязательных, признак ParamArray.
+
+    Optional/ParamArray снимают требование аргумента, ParamArray — и
+    верхнюю границу их числа.
+    """
+    sig = proc["sig"].strip()
+    names, required, variadic = [], 0, False
+    if sig.startswith("("):
+        inner = sig[1:-1] if sig.endswith(")") else sig[1:]
+        for arg in split_top(inner):
+            low = arg.lower().strip()
+            optional = False
+            while True:
+                m = re.match(r"^(byval|byref|optional|paramarray)\s+", low)
+                if not m:
+                    break
+                if m.group(1) in ("optional", "paramarray"):
+                    optional = True
+                if m.group(1) == "paramarray":
+                    variadic = True
+                low = low[m.end():]
+            m = re.match(r"(%s)" % NAME_RE, low)
+            if m:
+                names.append(m.group(1))
+                if not optional:
+                    required += 1
+    return {"names": names, "required": required, "variadic": variadic}
+
+
+def match_paren(text, open_idx):
+    """Индекс парной «)» для «(» на open_idx (строки уже замаскированы)."""
+    depth = 0
+    for i in range(open_idx, len(text)):
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+# Начало оператора: начало строки, после двоеточия, после Then/Else.
+STMT_HEAD = re.compile(r"(?:^|:|\bthen\b|\belse\b)\s*(?:call\s+)?$", re.I)
+# Продолжение выражения, а не аргумент: «Имя = …», «Имя > 0», «Имя And …».
+NOT_A_CALL = re.compile(r"^\s*(?:[=<>+\-*/\\^&.,)]|and\b|or\b|xor\b|mod\b"
+                        r"|is\b|like\b|to\b|then\b|else\b)", re.I)
+
+
+def stmt_tail(text, pos):
+    """Хвост оператора от pos до двоеточия верхнего уровня.
+
+    «:=» — именованный аргумент, а не разделитель операторов: «Двое a:=1,
+    b:=2» — один оператор с двумя аргументами.
+    """
+    depth = 0
+    for i in range(pos, len(text)):
+        ch = text[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == ":" and depth == 0 and text[i + 1:i + 2] != "=":
+            return text[pos:i]
+    return text[pos:]
+
+
+def find_calls(text, signatures, local=frozenset()):
+    """Вызовы процедур модуля в операторе: (имя, [аргументы]).
+
+    Три формы VBA: «Имя a, b» (голый вызов), «Имя(a, b)» (в выражении или
+    через Call) и «Имя» без аргументов. Имя функции как переменная
+    результата («Имя = …», «Имя > 0») вызовом не считается.
+
+    «Имя (a), b» в начале оператора — голый вызов, у которого первый
+    аргумент взят в скобки (VBA так делает по умолчанию), а не вызов с
+    одним аргументом: запятая после закрывающей скобки продолжает список.
+    Имя, объявленное в самой процедуре (local), затеняет процедуру модуля
+    — это законный VBA, и вызовом оно не считается.
+    """
+    out = []
+    for m in re.finditer(r"(?<![.\w])(%s)" % NAME_RE, text):
+        name = m.group(1).lower()
+        if name not in signatures or name in local:
+            continue
+        rest = text[m.end():]
+        stripped = rest.lstrip()
+        if stripped.startswith("("):
+            open_idx = m.end() + len(rest) - len(stripped)
+            close = match_paren(text, open_idx)
+            if close < 0:
+                continue                      # разобьёт E04
+            # «Имя(x) = 5» целым оператором — присваивание элементу массива,
+            # а не вызов. Но «If Имя(x) = key Then» — сравнение, и вызов в нём
+            # проверяется: разница только в позиции оператора.
+            at_head = STMT_HEAD.search(text[:m.start()])
+            after = text[close + 1:].lstrip()
+            if at_head and after.startswith("="):
+                continue
+            if at_head and after.startswith(","):
+                out.append((name, split_top(stmt_tail(text, m.end()))))
+                continue
+            out.append((name, split_top(text[open_idx + 1:close])))
+        elif STMT_HEAD.search(text[:m.start()]) and not NOT_A_CALL.match(rest):
+            out.append((name, split_top(stmt_tail(text, m.end()))))
+    return out
 
 
 def labels_in_proc(proc):
@@ -272,6 +488,34 @@ def labels_in_proc(proc):
 # ---------------------------------------------------------------------------
 # Проверки
 # ---------------------------------------------------------------------------
+
+# Строка объявления локальной переменной/константы.
+DECL = re.compile(r"^\s*(dim|static|const)\b")
+
+
+def usage_text(proc):
+    """Тело процедуры для поиска использований имени — без объявлений.
+
+    «Dim x As Long: x = 1» — объявление и использование в одной строке:
+    после двоеточия начинается отдельный оператор, его считаем.
+
+    Инициализатор константы — тоже использование: в «Const B = A * 2»
+    константа A используется, хотя строка и объявление. Без этого W04
+    считал A мёртвой (W06 на уровне модуля инициализаторы уже учитывал).
+    """
+    out = []
+    for _no, text, _span in proc["body"]:
+        t = mask_strings(text).lower()
+        if DECL.match(t):
+            rest = t.split(":", 1)[1] if ":" in t else ""
+            if re.match(r"^\s*const\b", t):
+                body = re.sub(r"^\s*const\s+", "", t.split(":", 1)[0])
+                inits = [part.split("=", 1)[1] for part in split_top(body)
+                         if "=" in part]
+                rest = " ".join(inits) + " " + rest
+            t = rest
+        out.append(t)
+    return "\n".join(out)
 
 
 def check_file(path):
@@ -294,7 +538,7 @@ def check_file(path):
         err("E01", 0, "файл не декодируется как Windows-1251: %s" % exc)
         return errors, warnings, []
     if text.encode(ENCODING) != raw:
-        err("E01", 0, "Windows-1251 round-trih не идентичен (битые символы)")
+        err("E01", 0, "Windows-1251 round-trip не идентичен (битые символы)")
     if b"\n" not in raw:
         err("E02", 0, "нет переводов строк")
     if re.search(rb"(?<!\r)\n", raw):
@@ -315,13 +559,27 @@ def check_file(path):
 
     logical = build_logical(raw_lines)
 
+    # E20 — предел VBA: 24 продолжения на логическую строку.
+    for no, _t, span in logical:
+        if len(span) - 1 > MAX_CONTINUATIONS:
+            err("E20", no, "%d продолжений «_» > %d"
+                % (len(span) - 1, MAX_CONTINUATIONS))
+
     # E05
     for i, line in enumerate(raw_lines, start=1):
         code = strip_comment(line).rstrip()
-        if code.endswith("_"):
+        if is_continued(code):
             nxt = raw_lines[i] if i < len(raw_lines) else ""
             if not strip_comment(nxt).strip():
                 err("E05", i, "продолжение «_», а следующая строка пуста/комментарий")
+
+    # E19 — VBA продолжает и комментарий: строка после «' … _» тоже станет
+    # комментарием, код в ней молча исчезает.
+    for i, line in enumerate(raw_lines, start=1):
+        comment = line[len(strip_comment(line)):]
+        if comment.startswith("'") and re.search(r"\s_\s*$", comment):
+            err("E19", i, "комментарий кончается на « _» — строка %d тоже станет "
+                          "комментарием" % (i + 1))
 
     # E06
     if not any(re.match(r"^\s*option\s+explicit\s*$", l, re.I) for l in raw_lines):
@@ -337,9 +595,29 @@ def check_file(path):
     for d in dups:
         err("E07", 0, "дублирующееся имя процедуры: %s" % d)
 
-    mod_names = collect_decls(procs, module)
+    mod_decls, mod_types, enum_members = module_level(module)
+    mod_names = set(mod_decls)
     proc_names = {p["name"].lower() for p in procs}
-    known = KEYWORDS | BUILTINS | CONSTANTS | TYPES | mod_names | proc_names
+    known = (KEYWORDS | BUILTINS | CONSTANTS | TYPES | mod_names | proc_names
+             | mod_types | enum_members)
+    signatures = {p["name"].lower(): proc_signature(p) for p in procs}
+    proc_label = {p["name"].lower(): p["name"] for p in procs}
+
+    # E03 — Type/End Type и Enum/End Enum: они объявляются на уровне модуля
+    # (внутри процедуры VBA их не допускает), поэтому проверяются здесь, а
+    # не в стеке процедуры.
+    mod_stack = []
+    for no, text, _span in module:
+        s = text.strip().lower()
+        m = re.match(r"^(?:public\s+|private\s+)?(type|enum)\s+%s" % NAME_RE, s)
+        if m:
+            mod_stack.append((m.group(1), no))
+        elif re.match(r"^end (type|enum)\b", s):
+            kind = s.split()[1]
+            _close(mod_stack, kind, no, "End %s без %s" % (kind, kind),
+                   err, {"name": "<уровень модуля>"})
+    for kind, no in mod_stack:
+        err("E03", no, "%s не закрыт на уровне модуля" % kind.capitalize())
 
     for p in procs:
         low_body = [(no, mask_strings(text).lower(), text) for no, text, _ in p["body"]]
@@ -412,11 +690,47 @@ def check_file(path):
             if m and m.group(1) not in proc_names:
                 err("E09", no, "%s: Call %s — процедура не найдена" % (p["name"], m.group(1)))
 
-        # E10/E11 — обработчики ошибок и метки
+        # E21/E22 — вызовы процедур модуля: число аргументов и имена
+        # именованных. Сигнатуры известны, поэтому это проверяемо статически
+        # — а VBA в CI не запускается, и «Argument not optional» иначе
+        # всплывает только при импорте модуля в Excel.
+        local_names = declared_in_proc(p)
+        for no, text, _orig in p["body"]:
+            for name, args in find_calls(mask_strings(text), signatures,
+                                         local_names):
+                sig = signatures[name]
+                positional, named = 0, []
+                for arg in args:
+                    m = re.match(r"^(%s)\s*:=" % NAME_RE, arg)
+                    if m:
+                        named.append(m.group(1).lower())
+                    else:
+                        positional += 1
+                for nm in named:
+                    if nm not in sig["names"]:
+                        err("E22", no, "%s: у %s нет параметра «%s»"
+                            % (p["name"], proc_label[name], nm))
+                covered = set(sig["names"][:positional]) | set(named)
+                missing = [nm for nm in sig["names"][:sig["required"]]
+                           if nm not in covered]
+                want = ("%d…%d" % (sig["required"], len(sig["names"]))
+                        if sig["required"] != len(sig["names"])
+                        else str(sig["required"]))
+                if sig["variadic"]:
+                    want = ">= %d" % sig["required"]
+                if missing:
+                    err("E21", no, "%s: %s — не хватает аргументов (%s), нужно %s"
+                        % (p["name"], proc_label[name], ", ".join(missing), want))
+                elif not sig["variadic"] and len(args) > len(sig["names"]):
+                    err("E21", no, "%s: %s — аргументов %d, нужно %s"
+                        % (p["name"], proc_label[name], len(args), want))
+
+        # E10/E11 — обработчики ошибок и метки. Имя метки бывает кириллицей
+        # («On Error GoTo Ошибка»), поэтому NAME_RE, а не [a-z_]\w*.
         labels = labels_in_proc(p)
         open_resume = None
         for no, t, _orig in low_body:
-            m = re.match(r"^\s*on error goto ([a-z_]\w*)", t)
+            m = re.match(r"^\s*on error goto (%s)" % NAME_RE, t)
             if m and m.group(1) not in labels:
                 err("E10", no, "%s: метка «%s» не определена" % (p["name"], m.group(1)))
             if re.match(r"^\s*on error resume next\s*$", t):
@@ -425,48 +739,42 @@ def check_file(path):
             elif re.match(r"^\s*on error goto", t) or re.match(r"^\s*on error resume\b", t):
                 if open_resume is not None and not re.match(r"^\s*on error resume next", t):
                     open_resume = None
-            if re.match(r"^\s*(exit (sub|function)|end (sub|function))", t):
-                pass
         if open_resume is not None:
             err("E11", open_resume, "%s: On Error Resume Next не восстановлен" % p["name"])
 
         # W05 — неиспользуемые метки
         used_labels = set()
         for no, t, _orig in low_body:
-            for m in re.finditer(r"(?:goto|resume)\s+([a-z_]\w*)", t):
+            for m in re.finditer(r"(?:goto|resume)\s+(%s)" % NAME_RE, t):
                 used_labels.add(m.group(1))
         for lb, no in labels.items():
             if lb not in used_labels:
                 warn("W05", no, "%s: метка «%s:» без переходов" % (p["name"], lb))
 
-        # E12 — функция без присваивания результата
+        # E12 — функция без присваивания результата. Присваивание бывает и в
+        # однострочном If («If x Then Foo = 1»), и после двоеточия.
         if p["kind"] == "function":
-            assigned = False
-            for no, t, _orig in low_body:
-                if re.match(r"^\s*%s\s*=" % re.escape(p["name"].lower()), t) or re.match(
-                    r"^\s*set\s+%s\s*=" % re.escape(p["name"].lower()), t
-                ):
-                    assigned = True
-                    break
-            if not assigned:
+            pat = re.escape(p["name"].lower())
+            assign = re.compile(r"(?:^\s*|\bthen\s+|\belse\s+|:\s*)(?:set\s+)?%s\s*="
+                                % pat)
+            if not any(assign.search(t) for _, t, _ in low_body):
                 err("E12", p["start"], "%s: имя функции ни разу не присваивается" % p["name"])
 
-        # E14 — дубликаты Case
-        cases = None
+        # E14 — дубликаты Case. Список меток свой на каждый Select Case:
+        # вложенный Select не должен сбрасывать список внешнего блока.
+        case_stack = []
         for no, t, _orig in low_body:
             s = t.strip()
             if s.startswith("select case"):
-                cases = []
-                continue
-            if cases is not None:
-                if s.startswith("case "):
-                    if not s.startswith("case else"):
-                        cases.extend(x.strip() for x in s[5:].split(","))
-                elif s.startswith("end select"):
-                    for k, v in collections.Counter(cases).items():
+                case_stack.append([])
+            elif s.startswith("end select"):
+                if case_stack:
+                    for k, v in collections.Counter(case_stack.pop()).items():
                         if v > 1:
                             err("E14", no, "%s: дубль Case %s (×%d)" % (p["name"], k, v))
-                    cases = None
+            elif s.startswith("case ") and case_stack:
+                if not s.startswith("case else"):
+                    case_stack[-1].extend(x.strip() for x in s[5:].split(","))
 
         # E15 — ReDim (1 To N) с риском N = 0
         for no, t, _orig in low_body:
@@ -483,84 +791,88 @@ def check_file(path):
             err("E04", i, "нечётное число кавычек в физической строке "
                           "(литерал не может продолжаться через «_»): %s" % code.strip()[:60])
 
-    # E18 — имя в позиции «Имя(...)» обязано быть объявлено (переменная или
-    # массив → индексация) либо быть процедурой/встроенной функцией. Ловит в
-    # том числе случайно закомментированное или удалённое определение.
-    declared = set(mod_names) | proc_names
-    for p2 in procs:
-        declared |= declared_in_proc(p2)
-    for no, text, _ in logical:
-        m = re.match(
-            r"^(private|public\s+)?(dim|const|static|redim|type|enum)\s+"
-            r"(?:withevents\s+)?(%s)" % NAME_RE, text.strip(), re.I)
-        if m:
-            declared.add(m.group(3).lower())
-
-    for p2 in procs:
-        for no, text, _ in p2["body"]:
-            scan = mask_strings(text)
-            scan = re.sub(r"^\s*(public|private|friend)?\s*(sub|function)\s+\S+",
-                          "", scan, flags=re.I)
-            scan = re.sub(r"\.\s*%s" % NAME_RE, " ", scan)
-            for m in re.finditer(r"(?<![.\w])(%s)\s*\(" % NAME_RE, scan):
-                nm = m.group(1).lower()
-                if nm in declared or nm in known:
-                    continue
-                err("E18", no, "%s: «%s(...)» — имя не объявлено и такой "
-                               "процедуры нет" % (p2["name"], m.group(1)))
-
-    # E17 — разорванная конкатенация/выражение
-    cont_idx = set()
-    for start_no, _t, span in logical:
-        for x in span[:-1]:
-            cont_idx.add(x)
+    # E17 — разорванная конкатенация/выражение: строка начинается с бинарного
+    # оператора, а предыдущая не продолжена «_». Чаще всего рвётся именно
+    # перед And/Or/Mod, а не перед «+».
     for i, line in enumerate(raw_lines, start=1):
         s = line.strip()
         if not s or s.startswith("'"):
             continue
-        if i in cont_idx or (i > 1 and (i - 1) in cont_idx):
-            pass
-        if re.match(r"^(&|\+|=|<>|<|>|\*|/|\\\\)\s*\S", s):
+        if re.match(r"^(&|\+|=|<>|<=|>=|<|>|\*|/|\\|\^|and\b|or\b|xor\b|mod\b)\s*\S",
+                    s, re.I):
             prev = strip_comment(raw_lines[i - 2]).rstrip() if i > 1 else ""
-            if not prev.endswith("_"):
+            if not is_continued(prev):
                 err("E17", i, "строка начинается с «%s», но предыдущая не "
                               "продолжена знаком _" % s.split()[0])
 
-    # E13 — дубликаты номеров ошибок
+    # E13 — дубликаты номеров ошибок. Комментарий и строковый литерал — не
+    # код: упоминание «vbObjectError + 28» в пояснении дублем не считается.
     nums = collections.OrderedDict()
     for i, line in enumerate(raw_lines, start=1):
-        m = re.search(r"vbobjecterror\s*\+\s*(\d+)", line, re.I)
+        m = re.search(r"vbobjecterror\s*\+\s*(\d+)", mask_strings(strip_comment(line)),
+                      re.I)
         if m:
             nums.setdefault(int(m.group(1)), []).append(i)
     for code, where in nums.items():
         if len(where) > 1:
             err("E13", where[1], "код ошибки %d reused на строках %s" % (code, where))
 
-    # E16 — строка кода на нулевом отступе внутри процедуры
-    in_proc = False
-    for i, line in enumerate(raw_lines, start=1):
-        s = line.strip()
-        if not s:
-            continue
-        if PROC_START.match(line) and re.match(
-            r"^\s*(public|private|friend)\s+(sub|function)\b", line, re.I
-        ):
-            in_proc = True
-            continue
-        if PROC_END.match(line):
-            in_proc = False
-            continue
-        if not in_proc:
-            continue
-        if line[0] in " \t":
-            continue
-        if s.startswith("'") or re.match(r"^%s:$" % NAME_RE, s):
-            continue
-        err("E16", i, "код внутри процедуры на нулевом отступе: %s" % s[:60])
-
-    # W04 — неиспользуемые параметры/локали
+    # E16 — строка кода на нулевом отступе внутри процедуры. Границы берутся
+    # из разбора модуля: сигнатура в несколько строк («Private Function X( _»)
+    # по физической строке не опознаётся, и раньше тело такой процедуры не
+    # проверялось вовсе.
     for p in procs:
-        flat = "\n".join(mask_strings(t).lower() for _, t, _ in p["body"])
+        for i in range(p["span"][-1] + 1, p.get("end", p["start"])):
+            line = raw_lines[i - 1]
+            s = line.strip()
+            if (not s or line[0] in " \t" or s.startswith("'")
+                    or re.match(r"^%s:$" % NAME_RE, s)):
+                continue
+            err("E16", i, "код внутри процедуры на нулевом отступе: %s" % s[:60])
+
+    # E23 — тип в «As <Тип>» обязан быть известен: встроенный, объектный или
+    # объявленный в этом модуле (Type/Enum). E08 такие имена не видит — он
+    # вырезает «As …» целиком, — а опечатка в типе это ошибка компиляции VBA
+    # («User-defined type not defined»). Класс из другого модуля проекта
+    # добавляется в TYPES тем же коммитом (см. докстринг).
+    known_types = TYPES | OBJECT_TYPES | mod_types
+    scans = [("<уровень модуля>", [(no, t) for no, t, _span in module])]
+    for p in procs:
+        scans.append((p["name"],
+                      [(p["start"], p["sig"])]
+                      + [(no, t) for no, t, _span in p["body"]]))
+    for label, lines in scans:
+        for no, text in lines:
+            for m in re.finditer(
+                    r"\bas\s+(?:new\s+)?(%s)(?:\s*\.\s*(%s))?"
+                    % (NAME_RE, NAME_RE), mask_strings(text), re.I):
+                # С квалификатором («Excel.Worksheet») тип — последняя часть;
+                # имя библиотеки может быть любым, оно не объявляется здесь.
+                typ = m.group(2) or m.group(1)
+                if typ.lower() not in known_types:
+                    err("E23", no, "%s: тип «%s» не известен"
+                        % (label, m.group(0).split(None, 1)[1]))
+
+    # W06 — неиспользуемые объявления уровня модуля. Только Private:
+    # Public/Friend может использовать другой модуль проекта, отсюда этого
+    # не видно. Использование в инициализаторе другой константы считается.
+    bodies_text = "\n".join(mask_strings(t).lower()
+                            for p in procs for _, t, _span in p["body"])
+    mod_lines = [(no, mask_strings(t).lower()) for no, t, _span in module]
+    for nm, (no, visibility, label) in sorted(mod_decls.items()):
+        if visibility != "private" or nm in TYPES:
+            continue
+        pat = r"(?<![\.\w])%s(?![\w])" % re.escape(nm)
+        uses = len(re.findall(pat, bodies_text))
+        uses += sum(len(re.findall(pat, t)) for mno, t in mod_lines if mno != no)
+        if uses == 0:
+            warn("W06", no,
+                 "«%s» объявлен на уровне модуля и не используется" % label)
+
+    # W04 — неиспользуемые параметры/локали. Строка объявления — не
+    # использование: иначе всякий Dim сам себе оправдание и правило молчит.
+    for p in procs:
+        flat = usage_text(p)
         declared = declared_in_proc(p)
         for nm in sorted(declared):
             if nm == p["name"].lower() or nm in TYPES:
@@ -578,17 +890,376 @@ def _close(stack, kind, no, msg, err, proc):
         err("E03", no, "%s в %s" % (msg, proc["name"]))
 
 
+# ---------------------------------------------------------------------------
+# Самопроверка правил: правила, которые молча не срабатывают, — худший вид
+# поломки линтера (вывод зелёный, проверки нет). Каждый кейс — маленький
+# модуль и правило, которое обязано сработать (want) или обязано молчать
+# (skip). Гоняется тем же check_file, что и Module1.bas, до обхода файлов.
+# ---------------------------------------------------------------------------
+
+SELFTEST = [
+    ("E16: многострочная сигнатура, тело на нулевом отступе",
+     "Private Function Много( _\n"
+     "    ByVal a As Long) As Long\n"
+     "Много = a\n"
+     "End Function\n", {"E16"}, set()),
+    ("E16: отступ на месте — молчит",
+     "Private Function Много( _\n"
+     "    ByVal a As Long) As Long\n"
+     "    Много = a\n"
+     "End Function\n", set(), {"E16"}),
+    ("W04: локальная переменная объявлена и не используется",
+     "Private Sub Дело()\n"
+     "    Dim лишняя As Long\n"
+     "    Dim нужная As Long\n"
+     "    нужная = 1\n"
+     "End Sub\n", {"W04"}, set()),
+    ("W04: Dim — не использование, но «Dim x: x = 1» — использование",
+     "Private Sub Дело()\n"
+     "    Dim x As Long: x = 1\n"
+     "End Sub\n", set(), {"W04"}),
+    ("E17: целочисленное деление «\\» в начале строки",
+     "Private Sub Дело()\n"
+     "    Dim x As Long\n"
+     "    x = 10\n"
+     "    \\ 2\n"
+     "End Sub\n", {"E17"}, set()),
+    ("E17: оборванное условие на And",
+     "Private Sub Дело(ByVal x As Long)\n"
+     "    If x = 1\n"
+     "    And x = 2 Then\n"
+     "        MsgBox \"x\"\n"
+     "    End If\n"
+     "End Sub\n", {"E17"}, set()),
+    ("E17: продолжение «_» перед And — законно",
+     "Private Sub Дело(ByVal x As Long)\n"
+     "    If x = 1 _\n"
+     "    And x = 2 Then\n"
+     "        MsgBox \"x\"\n"
+     "    End If\n"
+     "End Sub\n", set(), {"E17"}),
+    ("E10: кириллическая метка не найдена",
+     "Private Sub Дело()\n"
+     "    On Error GoTo Ошибка\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", {"E10"}, set()),
+    ("W05: кириллическая метка с переходом — не лишняя",
+     "Private Sub Дело()\n"
+     "    On Error GoTo Ошибка\n"
+     "    Exit Sub\n"
+     "Ошибка:\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", set(), {"E10", "W05"}),
+    ("E14: дубль Case во внешнем Select при вложенном",
+     "Private Sub Дело(ByVal x As Long)\n"
+     "    Select Case x\n"
+     "        Case 1\n"
+     "            Select Case x\n"
+     "                Case 2\n"
+     "                    MsgBox \"a\"\n"
+     "            End Select\n"
+     "        Case 1\n"
+     "            MsgBox \"b\"\n"
+     "    End Select\n"
+     "End Sub\n", {"E14"}, set()),
+    ("E12: присваивание в однострочном If",
+     "Private Function Флаг(ByVal x As Long) As Boolean\n"
+     "    If x > 0 Then Флаг = True\n"
+     "End Function\n", set(), {"E12"}),
+    ("E13: номер ошибки в комментарии — не дубль",
+     "Private Sub Дело()\n"
+     "    ' vbObjectError + 28 занят ниже\n"
+     "    Err.Raise vbObjectError + 28, , \"x\"\n"
+     "End Sub\n", set(), {"E13"}),
+    ("E13: настоящий дубль номера ошибки",
+     "Private Sub Дело(ByVal x As Long)\n"
+     "    If x = 1 Then\n"
+     "        Err.Raise vbObjectError + 28, , \"x\"\n"
+     "    End If\n"
+     "    Err.Raise vbObjectError + 28, , \"y\"\n"
+     "End Sub\n", {"E13"}, set()),
+    ("E19: комментарий кончается на « _»",
+     "Private Sub Дело()\n"
+     "    ' пояснение с переносом _\n"
+     "    MsgBox \"код, а не комментарий\"\n"
+     "End Sub\n", {"E19"}, set()),
+    ("E20: 25 продолжений в одной логической строке",
+     "Private Sub Дело()\n"
+     "    Dim x As Long\n"
+     "    x = 1 + _\n" + "        1 + _\n" * 24 + "        1\n"
+     "End Sub\n", {"E20"}, set()),
+    ("E20: ровно 24 продолжения — предел не превышен",
+     "Private Sub Дело()\n"
+     "    Dim x As Long\n"
+     "    x = 1 + _\n" + "        1 + _\n" * 23 + "        1\n"
+     "End Sub\n", set(), {"E20"}),
+    ("E08: выдуманное «встроенное» имя больше не прикрывает опечатку",
+     "Private Sub Дело()\n"
+     "    Sleep 1\n"
+     "End Sub\n", {"E08"}, set()),
+    ("E21: голый вызов без обязательного аргумента",
+     "Private Sub Дело()\n"
+     "    Двое 1\n"
+     "End Sub\n\n"
+     "Private Sub Двое(ByVal a As Long, ByVal b As Long)\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", {"E21"}, set()),
+    ("E21: вызов в скобках с лишним аргументом",
+     "Private Sub Дело()\n"
+     "    MsgBox Один(1, 2)\n"
+     "End Sub\n\n"
+     "Private Function Один(ByVal a As Long) As Long\n"
+     "    Один = a\n"
+     "End Function\n", {"E21"}, set()),
+    ("E21: вызов внутри сравнения — тоже вызов",
+     "Private Sub Дело()\n"
+     "    If Двое(1) = 2 Then\n"
+     "        MsgBox \"x\"\n"
+     "    End If\n"
+     "End Sub\n\n"
+     "Private Function Двое(ByVal a As Long, ByVal b As Long) As Long\n"
+     "    Двое = a\n"
+     "End Function\n", {"E21"}, set()),
+    ("E21: Optional можно опустить и можно передать",
+     "Private Sub Дело()\n"
+     "    Трое 1, 2\n"
+     "    Трое 1, 2, 3\n"
+     "End Sub\n\n"
+     "Private Sub Трое(ByVal a As Long, ByVal b As Long, _\n"
+     "                 Optional ByVal c As Long = 0)\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", set(), {"E21"}),
+    ("E21: ParamArray снимает верхнюю границу",
+     "Private Sub Дело()\n"
+     "    Много\n"
+     "    Много 1, 2, 3\n"
+     "End Sub\n\n"
+     "Private Sub Много(ParamArray vals() As Variant)\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", set(), {"E21"}),
+    ("E21: имя функции как результат — не вызов",
+     "Private Function Флаг(ByVal x As Long) As Long\n"
+     "    Флаг = x\n"
+     "    If Флаг < 0 Then Флаг = 0\n"
+     "    Флаг = Флаг + 1\n"
+     "End Function\n", set(), {"E21", "E12"}),
+    ("E21: вызов с переносом строки считается целиком",
+     "Private Sub Дело()\n"
+     "    Двое 1, _\n"
+     "        2\n"
+     "End Sub\n\n"
+     "Private Sub Двое(ByVal a As Long, ByVal b As Long)\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", set(), {"E21"}),
+    ("E22: именованного аргумента нет в сигнатуре",
+     "Private Sub Дело()\n"
+     "    Двое a:=1, b:=2, c:=3\n"
+     "End Sub\n\n"
+     "Private Sub Двое(ByVal a As Long, ByVal b As Long)\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", {"E22"}, set()),
+    ("E22: верные именованные аргументы в любом порядке",
+     "Private Sub Дело()\n"
+     "    Двое b:=2, a:=1\n"
+     "End Sub\n\n"
+     "Private Sub Двое(ByVal a As Long, ByVal b As Long)\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", set(), {"E21", "E22"}),
+    ("E03: Type без End Type на уровне модуля",
+     "Private Type Точка\n"
+     "    x As Long\n\n"
+     "Private Sub Дело()\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", {"E03"}, set()),
+    ("E23: опечатка в типе («As Longn»)",
+     "Private Sub Дело()\n"
+     "    Dim x As Longn\n"
+     "    x = 1\n"
+     "End Sub\n", {"E23"}, set()),
+    ("E23: опечатка в типе после New",
+     "Private Sub Дело()\n"
+     "    Dim c As New Collectionn\n"
+     "    c.Add 1\n"
+     "End Sub\n", {"E23"}, set()),
+    ("E23: опечатка в типе параметра",
+     "Private Sub Дело(ByVal ws As Workheet)\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", {"E23"}, set()),
+    ("E23: известные типы, массив и Type/Enum модуля — молчит",
+     "Private Type Точка\n"
+     "    x As Long\n"
+     "End Type\n\n"
+     "Private Enum Цвет\n"
+     "    Красный = 1\n"
+     "End Enum\n\n"
+     "Private Sub Дело(ByVal ws As Worksheet)\n"
+     "    Dim a() As Long\n"
+     "    Dim p As Точка\n"
+     "    Dim c As Цвет\n"
+     "    Dim o As New Collection\n"
+     "    c = Красный\n"
+     "    p.x = 1\n"
+     "    o.Add p.x\n"
+     "    ReDim a(1 To 2)\n"
+     "    a(1) = c\n"
+     "    MsgBox ws.Name\n"
+     "End Sub\n", set(), {"E23", "E08"}),
+    ("W06: Private-константа уровня модуля не используется",
+     "Private Const ЛИШНЯЯ As Long = 5\n\n"
+     "Private Sub Дело()\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", {"W06"}, set()),
+    ("W06: используется в инициализаторе другой константы — молчит",
+     "Private Const БАЗА As Long = 5\n"
+     "Private Const ПРОИЗВ As Long = БАЗА * 2\n\n"
+     "Private Sub Дело()\n"
+     "    MsgBox ПРОИЗВ\n"
+     "End Sub\n", set(), {"W06"}),
+    ("W06: Public виден другим модулям проекта — не проверяется",
+     "Public gВнешняя As Long\n\n"
+     "Private Sub Дело()\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", set(), {"W06"}),
+    ("E03: закрытые Type и Enum на уровне модуля",
+     "Private Type Точка\n"
+     "    x As Long\n"
+     "End Type\n\n"
+     "Private Enum Цвет\n"
+     "    Красный = 1\n"
+     "    Синий = 2\n"
+     "End Enum\n\n"
+     "Private Sub Дело()\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", set(), {"E03"}),
+    # --- разбор вызовов, типов и объявлений (ревизия E21/E23/W04/W06) ---
+    ("E21: «Имя (a), b» — голый вызов, первый аргумент в скобках",
+     "Private Sub Прок(ByVal a As Long, ByVal b As Long)\n"
+     "End Sub\n\n"
+     "Private Sub Дело()\n"
+     "    Прок (1), 2\n"
+     "End Sub\n", set(), {"E21"}),
+    ("E21: «Имя (a)» без второго аргумента — по-прежнему ошибка",
+     "Private Sub Прок(ByVal a As Long, ByVal b As Long)\n"
+     "End Sub\n\n"
+     "Private Sub Дело()\n"
+     "    Прок (1)\n"
+     "End Sub\n", {"E21"}, set()),
+    ("E21: локаль затеняет процедуру модуля — это законный VBA",
+     "Private Function Двойник(ByVal a As Long, ByVal b As Long) As Long\n"
+     "    Двойник = a + b\n"
+     "End Function\n\n"
+     "Private Sub Дело()\n"
+     "    Dim Двойник As Variant\n"
+     "    Двойник = Array(1, 2)\n"
+     "    MsgBox Двойник(0)\n"
+     "End Sub\n", set(), {"E21"}),
+    ("E23: квалифицированный тип Excel.Worksheet известен",
+     "Private Sub Дело()\n"
+     "    Dim ws As Excel.Worksheet\n"
+     "    Set ws = ThisWorkbook.Worksheets(1)\n"
+     "    MsgBox ws.Name\n"
+     "End Sub\n", set(), {"E23"}),
+    ("E23: Scripting.Dictionary — тип из внешней библиотеки",
+     "Private Sub Дело()\n"
+     "    Dim d As Scripting.Dictionary\n"
+     "    Set d = CreateObject(\"Scripting.Dictionary\")\n"
+     "    MsgBox d.Count\n"
+     "End Sub\n", set(), {"E23"}),
+    ("E23: имя функции вместо типа — ошибка («As Left»)",
+     "Private Sub Дело()\n"
+     "    Dim x As Left\n"
+     "    MsgBox x\n"
+     "End Sub\n", {"E23"}, set()),
+    ("E08: второе имя в объявлении модуля тоже объявлено",
+     "Private a As Long, b As Long\n\n"
+     "Private Sub Дело()\n"
+     "    a = 1\n"
+     "    b = 2\n"
+     "    MsgBox a + b\n"
+     "End Sub\n", set(), {"E08", "W06"}),
+    ("W06: второе имя в объявлении модуля не используется",
+     "Private a As Long, b As Long\n\n"
+     "Private Sub Дело()\n"
+     "    a = 1\n"
+     "    MsgBox a\n"
+     "End Sub\n", {"W06"}, set()),
+    ("W04: константа, использованная другой константой, жива",
+     "Private Sub Дело()\n"
+     "    Const A As Long = 2\n"
+     "    Const B As Long = A * 3\n"
+     "    MsgBox B\n"
+     "End Sub\n", set(), {"W04"}),
+]
+
+
+def selftest():
+    """Прогнать SELFTEST. Возвращает список расхождений (пустой — всё ок)."""
+    import tempfile
+
+    bad = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for i, (title, body, want, skip) in enumerate(SELFTEST):
+            path = os.path.join(tmp, "case%d.bas" % i)
+            with open(path, "wb") as fh:
+                fh.write(("Option Explicit\n\n" + body).replace("\n", "\r\n")
+                         .encode(ENCODING))
+            errors, warnings, _logical = check_file(path)
+            got = {rule for rule, _no, _msg in errors + warnings}
+            missing = sorted(want - got)
+            extra = sorted(skip & got)
+            if missing or extra:
+                bad.append("%s: не сработало %s; сработало зря %s"
+                           % (title, ", ".join(missing) or "—",
+                              ", ".join(extra) or "—"))
+    # Продолжение — только « _», а не хвост идентификатора; сигнатуры
+    # «Static Sub» и «As Long()» обязаны попадать в разбор процедур.
+    if not is_continued("x = 1 + _") or is_continued("Dim foo_"):
+        bad.append("is_continued: « _» и хвост «foo_» различаются неверно")
+    # Недостаточно узнать сигнатуру — список параметров и тип результата
+    # обязаны лечь в разные поля: жадный «\(.*\)» съедал «As Long()».
+    for sig, want_sig, want_ret in (
+            ("Static Sub Дело()", "()", ""),
+            ("Public Static Sub Дело()", "()", ""),
+            ("Private Function Массив() As Long()", "()", "as long()"),
+            ("Private Function X(a As Long) As Long()", "(a As Long)",
+             "as long()"),
+            ("Private Function X(a As Long) As Long", "(a As Long)",
+             "as long")):
+        procs, _module = parse_procedures(
+            [(1, sig, [1]), (2, "End Function", [2])])
+        if not procs:
+            bad.append("PROC_START не узнаёт сигнатуру: %s" % sig)
+        elif (procs[0]["sig"], procs[0]["ret"]) != (want_sig, want_ret):
+            bad.append("сигнатура разделена неверно: %s → %r, %r (ожидалось "
+                       "%r, %r)" % (sig, procs[0]["sig"], procs[0]["ret"],
+                                    want_sig, want_ret))
+    return bad
+
+
+def default_targets(root):
+    """Все *.bas/*.cls репозитория. В .git не заходим (os.walk в него и не
+    спускается), а .github обходим — подстрока «.git» ловила и его."""
+    out = []
+    for dp, dirs, files in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d != ".git")
+        out.extend(os.path.join(dp, f) for f in files
+                   if f.lower().endswith((".bas", ".cls")))
+    return sorted(out)
+
+
 def main(argv):
     targets = argv[1:]
     if not targets:
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        targets = sorted(
-            os.path.join(dp, f)
-            for dp, _d, fs in os.walk(root)
-            if ".git" not in dp
-            for f in fs
-            if f.lower().endswith((".bas", ".cls"))
-        )
+        targets = default_targets(root)
+    bad = selftest()
+    print("самопроверка правил: %d кейсов, расхождений %d"
+          % (len(SELFTEST), len(bad)))
+    for msg in bad:
+        print("  FAIL " + msg)
+    if bad:
+        return 1
+
     if not targets:
         print("нет файлов .bas/.cls для проверки")
         return 0
