@@ -34,6 +34,7 @@
 
 import random
 import sys
+import time
 
 EPS = 0.0001            # PLAN_EPS
 NODE_LIMIT = 300000     # PLAN_NODE_LIMIT
@@ -308,8 +309,23 @@ def place_bundle_on_free_rail(rails, lens, placed_rail, cab_id, kind, items):
 # ---------------------------------------------------------------------------
 
 def brute_force(lengths, caps):
-    """Можно ли разложить неделимые куски lengths по рейкам caps."""
+    """Можно ли разложить неделимые куски lengths по рейкам caps.
+
+    Сначала дешёвый отказ: не хватает суммарной ёмкости или самый длинный
+    кусок длиннее самой длинной рейки. Без этого заведомо невозможная
+    задача обходила всё дерево — при 16 элементах и четырёх рейках это
+    самая дорогая ветка перебора.
+
+    Допуск суммы — EPS на элемент, а не один EPS: go() прощает до EPS на
+    каждое размещение, поэтому одиночный допуск отсекал бы укладки,
+    которые перебор считает возможными. С множителем условие строго
+    слабее перебора и ответ не меняет.
+    """
     lengths = sorted(lengths, reverse=True)
+    if sum(lengths) > sum(caps) + EPS * max(1, len(lengths)):
+        return False
+    if lengths and lengths[0] > max(caps, default=0) + EPS:
+        return False
     free = list(caps)
 
     def go(k):
@@ -627,7 +643,15 @@ def main():
     scenario_phase2_no_repeat()
     scenario_budget_not_wasted()
     scenario_shared_budget()
+    # Время прогона печатается: рандом сверяется с брутфорсом, а тот на
+    # невозможных задачах экспоненциален. Дешёвый отказ в brute_force
+    # снимает часть таких случаев, но не все (бывает, что сумма влезает,
+    # а укладки всё равно нет) — рост времени должен быть виден в логе CI,
+    # а не обнаруживаться через полгода.
+    t0 = time.perf_counter()
     randomized()
+    t1 = time.perf_counter()
+    print(f"     (время прогона {t1 - t0:.2f} s)")
     # Второй прогон: настоящие ширины модулей и барьеров (defLensFallback),
     # до 8 блоков — остатки реек почти никогда не равны, дедупликация
     # SearchBlocks не помогает и перебор идёт шире. Ёмкости подобраны так,
@@ -636,6 +660,7 @@ def main():
     randomized(trials=400, seed=20261103, caps_pool=(200, 260, 320),
                used_pool=(0, 0, 23), widths=(13, 23, 35, 67, 100, 110, 157, 164),
                max_blk=8, max_per_blk=2, label="Неровные ширины:")
+    print(f"     (время прогона {time.perf_counter() - t1:.2f} s)")
     if FAIL:
         print(f"\nрасхождений: {len(FAIL)}")
         return 1
