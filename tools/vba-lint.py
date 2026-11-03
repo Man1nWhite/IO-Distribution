@@ -9,13 +9,16 @@ vba-lint.py — статическая проверка VBA-модуля (Module
   E01 кодировка: файл должен декодироваться в Windows-1251 и round-trip'иться
   E02 окончания строк: только CRLF, файл обязан заканчиваться переводом строки
   E03 несбалансированные блоки (If/ElseIf/End If, For/Next, Do/Loop, With,
-      Select Case/End Select, While/Wend, Type/End Type) в пределах процедуры
+      Select Case/End Select, While/Wend) в пределах процедуры и
+      Type/End Type, Enum/End Enum на уровне модуля
   E04 скобки и кавычки в логической строке (с учётом переносов «_»)
   E05 висячее продолжение строки («_» в конце файла или перед комментарием)
   E06 отсутствие Option Explicit
   E07 дублирующиеся имена процедур (в VBA: «Ambiguous name detected»)
   E08 идентификатор не объявлен (при Option Explicit это ошибка компиляции)
-  E09 вызов несуществующей процедуры
+  E09 Call <имя> — такой процедуры нет. Только явный Call: голые вызовы
+      (обычный стиль этого модуля) покрыты E08 — имя в них проверяется как
+      любой идентификатор, — и E21/E22 по сигнатуре
   E10 On Error GoTo <метка> — метка не найдена в этой процедуре
   E11 On Error Resume Next не закрыт до конца процедуры
   E12 функция нигде не присваивает имя себе (вернёт Empty/0/«»)
@@ -33,6 +36,11 @@ vba-lint.py — статическая проверка VBA-модуля (Module
       строка молча становится комментарием
   E20 больше 24 продолжений «_» в одной логической строке
       (VBA: Too many line continuations)
+  E21 неверное число аргументов в вызове процедуры модуля — голым вызовом,
+      в скобках или через Call; Optional и ParamArray учтены
+      (VBA: Argument not optional / Wrong number of arguments)
+  E22 именованный аргумент, которого нет в сигнатуре процедуры модуля
+      (VBA: Named argument not found)
 
 Предупреждения (код возврата не меняют):
   W01 табуляция вместо пробелов
@@ -290,6 +298,105 @@ def declared_in_proc(proc):
     return names
 
 
+def proc_signature(proc):
+    """Параметры процедуры: имена, число обязательных, признак ParamArray.
+
+    Optional/ParamArray снимают требование аргумента, ParamArray — и
+    верхнюю границу их числа.
+    """
+    sig = proc["sig"].strip()
+    names, required, variadic = [], 0, False
+    if sig.startswith("("):
+        inner = sig[1:-1] if sig.endswith(")") else sig[1:]
+        for arg in split_top(inner):
+            low = arg.lower().strip()
+            optional = False
+            while True:
+                m = re.match(r"^(byval|byref|optional|paramarray)\s+", low)
+                if not m:
+                    break
+                if m.group(1) in ("optional", "paramarray"):
+                    optional = True
+                if m.group(1) == "paramarray":
+                    variadic = True
+                low = low[m.end():]
+            m = re.match(r"(%s)" % NAME_RE, low)
+            if m:
+                names.append(m.group(1))
+                if not optional:
+                    required += 1
+    return {"names": names, "required": required, "variadic": variadic}
+
+
+def match_paren(text, open_idx):
+    """Индекс парной «)» для «(» на open_idx (строки уже замаскированы)."""
+    depth = 0
+    for i in range(open_idx, len(text)):
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+# Начало оператора: начало строки, после двоеточия, после Then/Else.
+STMT_HEAD = re.compile(r"(?:^|:|\bthen\b|\belse\b)\s*(?:call\s+)?$", re.I)
+# Продолжение выражения, а не аргумент: «Имя = …», «Имя > 0», «Имя And …».
+NOT_A_CALL = re.compile(r"^\s*(?:[=<>+\-*/\\^&.,)]|and\b|or\b|xor\b|mod\b"
+                        r"|is\b|like\b|to\b|then\b|else\b)", re.I)
+
+
+def stmt_tail(text, pos):
+    """Хвост оператора от pos до двоеточия верхнего уровня.
+
+    «:=» — именованный аргумент, а не разделитель операторов: «Двое a:=1,
+    b:=2» — один оператор с двумя аргументами.
+    """
+    depth = 0
+    for i in range(pos, len(text)):
+        ch = text[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == ":" and depth == 0 and text[i + 1:i + 2] != "=":
+            return text[pos:i]
+    return text[pos:]
+
+
+def find_calls(text, signatures):
+    """Вызовы процедур модуля в операторе: (имя, [аргументы]).
+
+    Три формы VBA: «Имя a, b» (голый вызов), «Имя(a, b)» (в выражении или
+    через Call) и «Имя» без аргументов. Имя функции как переменная
+    результата («Имя = …», «Имя > 0») вызовом не считается.
+    """
+    out = []
+    for m in re.finditer(r"(?<![.\w])(%s)" % NAME_RE, text):
+        name = m.group(1).lower()
+        if name not in signatures:
+            continue
+        rest = text[m.end():]
+        stripped = rest.lstrip()
+        if stripped.startswith("("):
+            open_idx = m.end() + len(rest) - len(stripped)
+            close = match_paren(text, open_idx)
+            if close < 0:
+                continue                      # разобьёт E04
+            # «Имя(x) = 5» целым оператором — присваивание элементу массива,
+            # а не вызов. Но «If Имя(x) = key Then» — сравнение, и вызов в нём
+            # проверяется: разница только в позиции оператора.
+            if (STMT_HEAD.search(text[:m.start()])
+                    and text[close + 1:].lstrip().startswith("=")):
+                continue
+            out.append((name, split_top(text[open_idx + 1:close])))
+        elif STMT_HEAD.search(text[:m.start()]) and not NOT_A_CALL.match(rest):
+            out.append((name, split_top(stmt_tail(text, m.end()))))
+    return out
+
+
 def labels_in_proc(proc):
     out = {}
     for no, text, _ in proc["body"]:
@@ -402,6 +509,24 @@ def check_file(path):
     mod_names = collect_decls(procs, module)
     proc_names = {p["name"].lower() for p in procs}
     known = KEYWORDS | BUILTINS | CONSTANTS | TYPES | mod_names | proc_names
+    signatures = {p["name"].lower(): proc_signature(p) for p in procs}
+    proc_label = {p["name"].lower(): p["name"] for p in procs}
+
+    # E03 — Type/End Type и Enum/End Enum: они объявляются на уровне модуля
+    # (внутри процедуры VBA их не допускает), поэтому проверяются здесь, а
+    # не в стеке процедуры.
+    mod_stack = []
+    for no, text, _span in module:
+        s = text.strip().lower()
+        m = re.match(r"^(?:public\s+|private\s+)?(type|enum)\s+%s" % NAME_RE, s)
+        if m:
+            mod_stack.append((m.group(1), no))
+        elif re.match(r"^end (type|enum)\b", s):
+            kind = s.split()[1]
+            _close(mod_stack, kind, no, "End %s без %s" % (kind, kind),
+                   err, {"name": "<уровень модуля>"})
+    for kind, no in mod_stack:
+        err("E03", no, "%s не закрыт на уровне модуля" % kind.capitalize())
 
     for p in procs:
         low_body = [(no, mask_strings(text).lower(), text) for no, text, _ in p["body"]]
@@ -473,6 +598,39 @@ def check_file(path):
             m = re.match(r"^\s*call\s+(%s)" % NAME_RE, scan)
             if m and m.group(1) not in proc_names:
                 err("E09", no, "%s: Call %s — процедура не найдена" % (p["name"], m.group(1)))
+
+        # E21/E22 — вызовы процедур модуля: число аргументов и имена
+        # именованных. Сигнатуры известны, поэтому это проверяемо статически
+        # — а VBA в CI не запускается, и «Argument not optional» иначе
+        # всплывает только при импорте модуля в Excel.
+        for no, text, _orig in p["body"]:
+            for name, args in find_calls(mask_strings(text), signatures):
+                sig = signatures[name]
+                positional, named = 0, []
+                for arg in args:
+                    m = re.match(r"^(%s)\s*:=" % NAME_RE, arg)
+                    if m:
+                        named.append(m.group(1).lower())
+                    else:
+                        positional += 1
+                for nm in named:
+                    if nm not in sig["names"]:
+                        err("E22", no, "%s: у %s нет параметра «%s»"
+                            % (p["name"], proc_label[name], nm))
+                covered = set(sig["names"][:positional]) | set(named)
+                missing = [nm for nm in sig["names"][:sig["required"]]
+                           if nm not in covered]
+                want = ("%d…%d" % (sig["required"], len(sig["names"]))
+                        if sig["required"] != len(sig["names"])
+                        else str(sig["required"]))
+                if sig["variadic"]:
+                    want = ">= %d" % sig["required"]
+                if missing:
+                    err("E21", no, "%s: %s — не хватает аргументов (%s), нужно %s"
+                        % (p["name"], proc_label[name], ", ".join(missing), want))
+                elif not sig["variadic"] and len(args) > len(sig["names"]):
+                    err("E21", no, "%s: %s — аргументов %d, нужно %s"
+                        % (p["name"], proc_label[name], len(args), want))
 
         # E10/E11 — обработчики ошибок и метки. Имя метки бывает кириллицей
         # («On Error GoTo Ошибка»), поэтому NAME_RE, а не [a-z_]\w*.
@@ -707,6 +865,91 @@ SELFTEST = [
      "Private Sub Дело()\n"
      "    Sleep 1\n"
      "End Sub\n", {"E08"}, set()),
+    ("E21: голый вызов без обязательного аргумента",
+     "Private Sub Дело()\n"
+     "    Двое 1\n"
+     "End Sub\n\n"
+     "Private Sub Двое(ByVal a As Long, ByVal b As Long)\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", {"E21"}, set()),
+    ("E21: вызов в скобках с лишним аргументом",
+     "Private Sub Дело()\n"
+     "    MsgBox Один(1, 2)\n"
+     "End Sub\n\n"
+     "Private Function Один(ByVal a As Long) As Long\n"
+     "    Один = a\n"
+     "End Function\n", {"E21"}, set()),
+    ("E21: вызов внутри сравнения — тоже вызов",
+     "Private Sub Дело()\n"
+     "    If Двое(1) = 2 Then\n"
+     "        MsgBox \"x\"\n"
+     "    End If\n"
+     "End Sub\n\n"
+     "Private Function Двое(ByVal a As Long, ByVal b As Long) As Long\n"
+     "    Двое = a\n"
+     "End Function\n", {"E21"}, set()),
+    ("E21: Optional можно опустить и можно передать",
+     "Private Sub Дело()\n"
+     "    Трое 1, 2\n"
+     "    Трое 1, 2, 3\n"
+     "End Sub\n\n"
+     "Private Sub Трое(ByVal a As Long, ByVal b As Long, _\n"
+     "                 Optional ByVal c As Long = 0)\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", set(), {"E21"}),
+    ("E21: ParamArray снимает верхнюю границу",
+     "Private Sub Дело()\n"
+     "    Много\n"
+     "    Много 1, 2, 3\n"
+     "End Sub\n\n"
+     "Private Sub Много(ParamArray vals() As Variant)\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", set(), {"E21"}),
+    ("E21: имя функции как результат — не вызов",
+     "Private Function Флаг(ByVal x As Long) As Long\n"
+     "    Флаг = x\n"
+     "    If Флаг < 0 Then Флаг = 0\n"
+     "    Флаг = Флаг + 1\n"
+     "End Function\n", set(), {"E21", "E12"}),
+    ("E21: вызов с переносом строки считается целиком",
+     "Private Sub Дело()\n"
+     "    Двое 1, _\n"
+     "        2\n"
+     "End Sub\n\n"
+     "Private Sub Двое(ByVal a As Long, ByVal b As Long)\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", set(), {"E21"}),
+    ("E22: именованного аргумента нет в сигнатуре",
+     "Private Sub Дело()\n"
+     "    Двое a:=1, b:=2, c:=3\n"
+     "End Sub\n\n"
+     "Private Sub Двое(ByVal a As Long, ByVal b As Long)\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", {"E22"}, set()),
+    ("E22: верные именованные аргументы в любом порядке",
+     "Private Sub Дело()\n"
+     "    Двое b:=2, a:=1\n"
+     "End Sub\n\n"
+     "Private Sub Двое(ByVal a As Long, ByVal b As Long)\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", set(), {"E21", "E22"}),
+    ("E03: Type без End Type на уровне модуля",
+     "Private Type Точка\n"
+     "    x As Long\n\n"
+     "Private Sub Дело()\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", {"E03"}, set()),
+    ("E03: закрытые Type и Enum на уровне модуля",
+     "Private Type Точка\n"
+     "    x As Long\n"
+     "End Type\n\n"
+     "Private Enum Цвет\n"
+     "    Красный = 1\n"
+     "    Синий = 2\n"
+     "End Enum\n\n"
+     "Private Sub Дело()\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", set(), {"E03"}),
 ]
 
 
