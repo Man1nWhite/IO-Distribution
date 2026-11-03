@@ -88,12 +88,19 @@ def bas_text():
 
 
 def bas_const(name):
-    """Числовая константа из Module1.bas — строкой, как записана."""
-    m = re.search(r"(?m)^Private Const %s As \w+ = ([0-9][0-9.]*)#?" %
+    """Константа из Module1.bas — строкой, как записана (число или True/False)."""
+    m = re.search(r"(?m)^Private Const %s As \w+ = (True|False|[0-9][0-9.]*)#?" %
                   re.escape(name), bas_text())
     if not m:
         return None
     return m.group(1)
+
+
+def const_value(text):
+    """Значение константы для сравнения: bool для True/False, иначе Decimal."""
+    if text in ("True", "False"):
+        return text == "True"
+    return Decimal(text)
 
 
 def bas_array(name):
@@ -139,10 +146,15 @@ def check_numbers():
 
 
 def check_readme_constants():
-    """Числа констант, обещанные README («`ИМЯ` = N»), ↔ Module1.bas."""
+    """Значения констант, обещанные README («`ИМЯ` = N»), ↔ Module1.bas.
+
+    Булевы (`SWITCH_RESERVE_*` = True/False) сверяются наравне с числами:
+    режим резерва зоны — такое же обещание README, как и её размер.
+    """
     # Имя с «_» — константа модуля; так не цепляются ячейки (`D18`=4).
     found = sorted(set(re.findall(
-        r"`([A-Z][A-Z0-9]*_[A-Z0-9_]+)`\s*=\s*([0-9][0-9.]*)", readme())))
+        r"`([A-Z][A-Z0-9]*_[A-Z0-9_]+)`\s*=\s*(True|False|[0-9][0-9.]*)",
+        readme())))
     if not found:
         check("README называет константы как «`ИМЯ` = N»",
               "<ни одной>", "<хотя бы одна>")
@@ -150,8 +162,8 @@ def check_readme_constants():
     for name, value in found:
         got = bas_const(name)
         check("README: `%s` = %s == Module1.bas" % (name, value),
-              Decimal(got) if got is not None else "<нет такой константы>",
-              Decimal(value))
+              const_value(got) if got is not None else "<нет такой константы>",
+              const_value(value))
 
 
 def readme_rows():
@@ -346,9 +358,11 @@ def check_ci_matches_readme():
     if doc is None:
         check("раздел «Проверки» README == шаги CI", None, ci)
         return
-    # got — всегда код (шаги CI), want — доки (README).
-    check("раздел «Проверки» README == шаги CI",
-          sorted(ci), sorted(doc))
+    # got — всегда код (шаги CI), want — доки (README). Без sorted():
+    # README обещает «ровно те же шесть шагов … в том же порядке», и первый
+    # упавший шаг останавливает прогон — порядок здесь часть обещания.
+    check("раздел «Проверки» README == шаги CI (тот же порядок)",
+          ci, doc)
 
 
 def check_all_commands():
@@ -391,13 +405,22 @@ def check_readme_counts():
     """Числа, обещанные README, против фактических результатов инструментов."""
     doc = readme()
 
-    # «34 тестовых вектора» / «36 тестовых векторов» — форма по числу.
-    m = re.search(r"(\d+)\s+тестовых\s+вектор\w*", doc)
+    # «38 тестовых векторов» / «Разбор чисел: 38 векторов» — форма по числу.
+    # Сверяется каждое вхождение: счётчик продублирован в README трижды, и
+    # проверка только первого оставляла два остальных отставать молча.
     parse_out = tool_output(PARSE_SPEC)
-    need = int(m.group(1)) if m else None
     got = re.search(r"векторов:\s*(\d+)", parse_out)
-    check("«N тестовых вектора» в README == счётчик parse-spec.py",
-          int(got.group(1)) if got else None, need)
+    got = int(got.group(1)) if got else None
+    lines = doc.splitlines()
+    hits = [(i, m.group(0), int(m.group(1)))
+            for i, line in enumerate(lines, 1)
+            for m in re.finditer(r"(\d+)\s+(?:тестовых\s+)?вектор\w*", line)]
+    if not hits:
+        check("README называет число векторов («N векторов»)",
+              "<ни одного>", "<хотя бы одно>")
+    for no, phrase, need in hits:
+        check("«%s» в README (строка %d) == счётчик parse-spec.py"
+              % (phrase, no), got, need)
 
     m = re.search(r"все\s+(\d+)\s+имён", doc)
     map_out = tool_output(TOOLS / "check-readme-map.py")
@@ -436,6 +459,25 @@ def check_no_release_mentions():
     check("выпуск отложен: README и AGENTS.md без упоминаний выпусков", hits, [])
 
 
+def check_lint_catalog():
+    """«Каталог E01–EN / W01–WN» в README ↔ правила в докстринге линтера.
+
+    Новый номер правила в линтере без правки README — расхождение: каталог
+    в README переставал описывать то, что линтер проверяет (E18 → E20).
+    """
+    lint = (TOOLS / "vba-lint.py").read_text(encoding="utf-8")
+    parts = lint.split('"""')
+    doc = parts[1] if len(parts) > 1 else ""
+    top = {}
+    for letter in ("E", "W"):
+        nums = [int(n) for n in re.findall(r"\b%s(\d{2})\b" % letter, doc)]
+        top[letter] = max(nums) if nums else 0
+    got = "E01–E%02d / W01–W%02d" % (top["E"], top["W"])
+    m = re.search(r"Каталог\s*(E\d+–E\d+\s*/\s*W\d+–W\d+)", readme())
+    check("каталог правил линтера == «Каталог …» в README",
+          got, m.group(1) if m else "<в README не назван>")
+
+
 def check_precommit_hook():
     """Локальный хук ↔ README: vba-lint перед коммитом, установка описана."""
     hook = HOOK.read_text(encoding="utf-8") if HOOK.is_file() else ""
@@ -472,6 +514,7 @@ def main():
     check_windows_job()
     print("-- счётчики README ↔ результаты инструментов")
     check_readme_counts()
+    check_lint_catalog()
     print("-- отложенный выпуск, AGENTS.md и локальный хук")
     check_no_release_mentions()
     check_agents_doc()

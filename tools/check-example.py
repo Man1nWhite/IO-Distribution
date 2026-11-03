@@ -19,6 +19,15 @@
      первую подходящую строку, а выпадающий список в столбце C листа «1»
      может ссылаться на другую (так было с AIO.2.xx/2: 164 и 160 мм).
 
+Ячейка-ошибка (#N/A, #REF!) в столбце D — не расхождение: макрос читает её
+как 0 и молча пропускает строку (IsError → Exit Function в ЧитатьКол).
+Проверка ведёт себя так же, иначе CI падал бы на книге, которую макрос
+обрабатывает без замечаний.
+
+Отдельно печатается, что лежит в `D21` «Шкафов» — формула или число:
+`ЗаписатьЧислоШкафов` заменяет формулу числом, и от `D21` считает `D45`.
+Значение не сверяется: после прогона макроса оно меняется законно.
+
 Запуск: python3 tools/check-example.py [книга.xlsm]  (по умолчанию —
 Example.xlsm в корне репозитория).
 Код возврата: 0 — расхождений нет, 1 — есть.
@@ -96,6 +105,18 @@ class Book:
             t = target[sheet.get(R_ID)]
             out[sheet.get("name")] = t.lstrip("/") if t.startswith("/") \
                 else "xl/" + t
+        return out
+
+    def formulas(self, name):
+        """{адрес: текст формулы} листа — только ячейки с <f>."""
+        root = ET.fromstring(self.zip.read(self.paths[name]))
+        out = {}
+        for c in root.iterfind("m:sheetData/m:row/m:c", NS):
+            f = c.find("m:f", NS)
+            if f is not None:
+                # Общая формула (t="shared", si=N) хранится один раз —
+                # у остальных ячеек группы <f> пустой.
+                out[c.get("r")] = (f.text or "").strip() or "<общая формула>"
         return out
 
     def cells(self, name):
@@ -203,6 +224,11 @@ def service_rows(svc):
 def check_names_in_service(data, rows):
     for r in def_rows():
         qty_raw = data.get(COL_QTY + str(r))
+        if isinstance(qty_raw, XlError):
+            # ЧитатьКол: IsError(v) → 0, строка не участвует и молчит.
+            print("     строка %d: в %s%d %s — макрос читает 0, строка не участвует"
+                  % (r, COL_QTY, r, qty_raw))
+            continue
         qty = as_number(qty_raw)
         if qty is None:
             text = "" if qty_raw is None else as_text(qty_raw).strip()
@@ -267,6 +293,12 @@ def main(argv):
     check_names_in_service(data, rows)
     print("-- Service: ширины без противоречий")
     check_width_conflicts(rows)
+    print("-- D21 «Шкафов»: формула или число (справочно)")
+    f = book.formulas(SHEET_DATA).get("D21")
+    print("     D21: %s — значение %s; D45 считает от D21, после прогона"
+          " макроса формулы здесь нет"
+          % ("формула " + f if f else "число, формулы нет",
+             as_text(data.get("D21"))))
 
     print("\nпроверок: %d, расхождений: %d" % (CHECKS, len(FAILS)))
     if FAILS:

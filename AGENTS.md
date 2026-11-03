@@ -12,8 +12,9 @@
 2. Задача про укладку → `tools/plan-spec.py`; про разбор чисел →
    `tools/parse-spec.py`. Это исполняемые зеркала алгоритма (канон
    поведения), а не тесты VBA.
-3. `Module1.bas` — только нужные процедуры (карта процедур — в README,
-   `grep -n "^Private Sub" после iconv` даст индекс), не файл целиком.
+3. `Module1.bas` — только нужные процедуры (карта процедур — в README, индекс
+   даст `iconv -f cp1251 -t utf-8 Module1.bas | grep -nE "^(Private|Public) (Sub|Function)"`),
+   не файл целиком.
 
 ## Ловушки
 
