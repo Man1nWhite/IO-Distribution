@@ -411,11 +411,24 @@ def main(argv):
     check_channels(data, svc)
     print("-- Service: ширины без противоречий")
     check_width_conflicts(rows)
-    print("-- D21 «Шкафов»: формула или число (справочно)")
-    f = book.formulas(SHEET_DATA).get("D21")
+    print("-- формулы листа «1»: D26 обещана README, D21 справочно")
+    formulas = book.formulas(SHEET_DATA)
+    f26 = formulas.get("D26")
+    # D26 макрос не пишет (он пишет только ADDR_CAB_COUNT = D21), поэтому
+    # обещание README «D26 — формула ROUNDUP по AE10 и Service» проверяемо.
+    check(bool(f26), "README: `D26` — формула",
+          "в книге число %s — формула потеряна (макрос её не трогает)"
+          % as_text(data.get("D26")))
+    if f26:
+        missing = [w for w in ("ROUNDUP", "AE10", "Service")
+                   if w.upper() not in f26.upper()]
+        check(not missing, "формула D26 считает по ROUNDUP, AE10 и Service",
+              "в формуле нет: %s — %s" % (", ".join(missing), f26))
+        print("     D26: %s" % f26)
+    f21 = formulas.get("D21")
     print("     D21: %s — значение %s; D45 считает от D21, после прогона"
           " макроса формулы здесь нет"
-          % ("формула " + f if f else "число, формулы нет",
+          % ("формула " + f21 if f21 else "число, формулы нет",
              as_text(data.get("D21"))))
 
     print("\nпроверок: %d, расхождений: %d" % (CHECKS, len(FAILS)))
