@@ -16,9 +16,10 @@
      `tools/check-all.py --list` (тот же порядок): новый инструмент обязан
      попасть во все три места, иначе он тихо не работает; джоб windows
      запускает `python tools/check-all.py`;
-  5. счётчики, обещанные README («N тестовых вектора», «все N имён»,
-     «N логических строк»), ↔ фактические результаты parse-spec.py,
-     check-readme-map.py и vba-lint.py;
+  5. счётчики, обещанные README («N векторов» — каждое вхождение, «все N
+     имён», «N логических строк», если оно названо), ↔ фактические
+     результаты parse-spec.py, check-readme-map.py и vba-lint.py;
+     каталог правил линтера («E01–EN / W01–WN») ↔ его докстринг;
   6. вывод каждого `tools/*.py` переживает pipe в cp1252 — так Python пишет
      на Windows в Git Bash, в файл и в CI: без перевода вывода в UTF-8
      «↔», «−», «—» и кириллица роняют инструмент (UnicodeEncodeError);
@@ -429,13 +430,18 @@ def check_readme_counts():
     check("«все N имён» в README == счётчик check-readme-map.py",
           int(got.group(1)) if got else None, need)
 
+    # Счётчик логических строк меняется любой правкой модуля и никакого
+    # инварианта не выражает — README его не обещает. Если фраза вернётся,
+    # она снова сверяется: обещанное число не должно отставать.
     m = re.search(r"(\d+)\s+логических\s+строк", doc)
-    lint_out = tool_output(TOOLS / "vba-lint.py")
-    need = int(m.group(1)) if m else None
-    got = re.search(r"== Module1\.bas ==.*?\(логических строк (\d+)\)",
-                    lint_out, re.S)
-    check("«N логических строк» в README == счётчик vba-lint.py",
-          int(got.group(1)) if got else None, need)
+    if m:
+        lint_out = tool_output(TOOLS / "vba-lint.py")
+        got = re.search(r"== Module1\.bas ==.*?\(логических строк (\d+)\)",
+                        lint_out, re.S)
+        check("«N логических строк» в README == счётчик vba-lint.py",
+              int(got.group(1)) if got else None, int(m.group(1)))
+    else:
+        print("     «N логических строк» README не обещает — сверять нечего")
 
 
 # Выпуск отложен: в README и AGENTS.md не должно быть упоминаний выпусков.

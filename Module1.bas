@@ -230,9 +230,6 @@ Public Sub СоздатьКонфигуратор()
     Dim capFull As Double
     Dim capCtrl As Double
 
-    Dim gotCDI As Long
-    Dim gotCDO As Long
-
     Dim leftCnt As Long
     Dim leftDI As Long
     Dim leftDO As Long
@@ -697,11 +694,8 @@ Public Sub СоздатьКонфигуратор()
     If Not gSeparateMode Then
         For c = 1 To cabCount
             If cabCtrl(c) > 0 Then
-                ЗакрепитьРелеЗаКонтроллером _
-                    c, TYP_DI, DI_PER_CTRL, gotCDI
-
-                ЗакрепитьРелеЗаКонтроллером _
-                    c, TYP_DO, DO_PER_CTRL, gotCDO
+                ЗакрепитьРелеЗаКонтроллером c, TYP_DI, DI_PER_CTRL
+                ЗакрепитьРелеЗаКонтроллером c, TYP_DO, DO_PER_CTRL
             End If
         Next c
     End If
@@ -1086,9 +1080,10 @@ End Sub
 
 Private Sub ЗакрепитьРелеЗаКонтроллером( _
     ByVal cabId As Long, ByVal relType As Long, _
-    ByVal want As Long, ByRef gotCnt As Long)
+    ByVal want As Long)
 
     Dim b As Long
+    Dim gotCnt As Long
 
     gotCnt = 0
     If want <= 0 Then Exit Sub
@@ -2112,6 +2107,12 @@ Private Sub ПроверитьРазмещение()
                 "У размещённого элемента нет корректной рейки."
         End If
 
+    Next i
+
+    ' Владелец проверяется отдельным проходом: его индекс может быть больше
+    ' текущего, и в первом проходе его рейка ещё не проверена — mRail(owner)=0
+    ' дал бы «ошибка VBA 9» вместо кода 60/61.
+    For i = 1 To gTotalMods
         owner = mAnalogOwner(i)
 
         If owner > 0 Then
@@ -2766,7 +2767,7 @@ Private Function КаналыПоКатегории( _
                     If IsNumeric(v) Then
                         d = CDbl(v)
 
-                        If d >= 0 And d = Fix(d) Then
+                        If d >= 0 And d <= MAX_LONG And d = Fix(d) Then
                             КаналыПоКатегории = CLng(d)
                             found = True
                             Exit Function
@@ -3215,26 +3216,14 @@ End Function
 Private Function ЧитатьКол( _
     ByVal ws As Worksheet, ByVal r As Long) As Long
 
-    Dim v As Variant
-    Dim d As Double
+    ' Разбор общий с D18 и ячейками сигналов: IsNumeric -> CDbl, иначе
+    ' ЧислоИзТекста, дробь режется Fix, диапазон ограничен MAX_LONG.
+    ' Ошибка ячейки, пустая ячейка и булево дают 0 — строка не участвует.
+    ' Сам факт разбора текста отмечает ПроверитьЯчейкуКол.
+    ЧитатьКол = ИзвлечьЧисло(ws.Range(COL_QTY & r).Value2)
 
-    v = ws.Range(COL_QTY & r).Value2
-
-    If IsError(v) Then Exit Function
-    If IsEmpty(v) Then Exit Function
-
-    ' Нечисловой текст разбирается ЧислоИзТекста;
-    ' сам факт разбора отмечает ПроверитьЯчейкуКол.
-    If IsNumeric(v) Then
-        d = Int(CDbl(v))
-    Else
-        d = Int(ЧислоИзТекста(CStr(v)))
-    End If
-
-    If d < 0 Then d = 0
-    If d > MAX_LONG Then d = MAX_LONG
-
-    ЧитатьКол = CLng(d)
+    ' Отрицательное количество — не количество: строка не участвует.
+    If ЧитатьКол < 0 Then ЧитатьКол = 0
 End Function
 
 ' Столбец D обязан содержать число. Если там текст, количество берётся из
@@ -3662,7 +3651,6 @@ Private Sub НарисоватьРасположение( _
     Dim kindC As String
     Dim txtCol As Long
     Dim rb As Shape
-    Dim msh As Shape
 
     ' Масштаб отрисовки обязан быть согласован с высотой верхней зоны:
     ' CTRL_ZONE_MM мм при MM px/мм дают ровно CTRL_OFFSET_PX пикселей, иначе
@@ -3845,11 +3833,10 @@ Private Sub НарисоватьРасположение( _
 
             modH = mLen(idx) * MM
 
-            Set msh = ДобРект( _
-                wl, railX(rr) + 1, _
+            ДобРект wl, railX(rr) + 1, _
                 TOPY + yOff + mPos(idx) * MM, _
                 RAILW - 2, modH, mColor(idx), _
-                RGB(60, 60, 60), 0.25)
+                RGB(60, 60, 60), 0.25
 
             If modH >= 13 Then
                 txtCol = ТекстЦвет(mColor(idx))
