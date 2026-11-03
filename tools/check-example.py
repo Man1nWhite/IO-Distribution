@@ -24,9 +24,15 @@
 Проверка ведёт себя так же, иначе CI падал бы на книге, которую макрос
 обрабатывает без замечаний.
 
+`D26` макрос не пишет, поэтому обещание README «формула ROUNDUP по AE10 и
+Service» проверяется. Если ячейка окажется неведущей в общей формуле
+(t="shared"), текст по XML не восстановить — это говорится прямо, а не
+выдаётся за потерянную формулу.
+
 Отдельно печатается, что лежит в `D21` «Шкафов» — формула или число:
 `ЗаписатьЧислоШкафов` заменяет формулу числом, и от `D21` считает `D45`.
-Значение не сверяется: после прогона макроса оно меняется законно.
+Ни значение, ни наличие формулы не сверяются: и то и другое меняется
+законно — до первого прогона формула-оценка, после — число раскладки.
 
 Запуск: python3 tools/check-example.py [книга.xlsm]  (по умолчанию —
 Example.xlsm в корне репозитория).
@@ -48,6 +54,8 @@ SHEET_DATA = "1"
 SHEET_SERVICE = "Service"
 COL_NAME, COL_QTY = "C", "D"          # лист «1»
 SVC_NAME, SVC_WIDTH = "E", "H"        # Service (SVC_COL_NAME / SVC_COL_WIDTH)
+# Заглушка для неведущей ячейки общей формулы: <f> есть, текста нет.
+SHARED_FORMULA = "<общая формула>"
 
 NS = {
     "m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
@@ -116,7 +124,7 @@ class Book:
             if f is not None:
                 # Общая формула (t="shared", si=N) хранится один раз —
                 # у остальных ячеек группы <f> пустой.
-                out[c.get("r")] = (f.text or "").strip() or "<общая формула>"
+                out[c.get("r")] = (f.text or "").strip() or SHARED_FORMULA
         return out
 
     def cells(self, name):
@@ -327,9 +335,9 @@ def check_channels(data, svc):
                      if ch is not None and ch >= minimum), (None, None))
 
     for r in def_rows():
-        qty = as_number(data.get(COL_QTY + str(r)))
         if isinstance(data.get(COL_QTY + str(r)), XlError):
             continue
+        qty = as_number(data.get(COL_QTY + str(r)))
         if qty is None or int(qty) <= 0:
             continue
         name = as_text(data.get(COL_NAME + str(r))).strip()
@@ -419,17 +427,27 @@ def main(argv):
     check(bool(f26), "README: `D26` — формула",
           "в книге число %s — формула потеряна (макрос её не трогает)"
           % as_text(data.get("D26")))
-    if f26:
+    if f26 == SHARED_FORMULA:
+        # Общая формула хранится один раз — в ведущей ячейке группы.
+        # Содержимое этой ячейки по XML не восстановить, а заглушка не
+        # содержит ни ROUNDUP, ни AE10: проверка выдала бы ложное
+        # «формула потеряна». Говорим прямо, что сверить нечем.
+        print("     D26: общая формула (t=\"shared\") — текст хранится в"
+              " ведущей ячейке группы, содержимое проверить вручную")
+    elif f26:
         missing = [w for w in ("ROUNDUP", "AE10", "Service")
                    if w.upper() not in f26.upper()]
         check(not missing, "формула D26 считает по ROUNDUP, AE10 и Service",
               "в формуле нет: %s — %s" % (", ".join(missing), f26))
         print("     D26: %s" % f26)
     f21 = formulas.get("D21")
-    print("     D21: %s — значение %s; D45 считает от D21, после прогона"
-          " макроса формулы здесь нет"
-          % ("формула " + f21 if f21 else "число, формулы нет",
-             as_text(data.get("D21"))))
+    if f21:
+        print("     D21: формула %s — значение %s; макрос заменит её числом"
+              % (f21, as_text(data.get("D21"))))
+    else:
+        print("     D21: число, формулы нет — значение %s; так и оставляет"
+              " ЗаписатьЧислоШкафов, от D21 считает D45"
+              % as_text(data.get("D21")))
 
     print("\nпроверок: %d, расхождений: %d" % (CHECKS, len(FAILS)))
     if FAILS:

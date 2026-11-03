@@ -500,7 +500,9 @@ def check_readme_counts():
         check("«%s» в README (строка %d) == счётчик parse-spec.py"
               % (phrase, no), got, need)
 
-    m = re.search(r"все\s+(\d+)\s+имён", doc)
+    # «21 имя», «22 имени», «52 имени», «11 имён» — форма зависит от числа,
+    # поэтому годятся все три; требование одной формы делало текст неверным.
+    m = re.search(r"все\s+(\d+)\s+(?:имя|имени|имён)", doc)
     map_out = tool_output(TOOLS / "check-readme-map.py")
     need = int(m.group(1)) if m else None
     got = re.search(r"карта README:\s*(\d+) имён", map_out)
