@@ -37,21 +37,28 @@ vba-lint.py — статическая проверка VBA-модуля (Module
   E20 больше 24 продолжений «_» в одной логической строке
       (VBA: Too many line continuations)
   E21 неверное число аргументов в вызове процедуры модуля — голым вызовом,
-      в скобках или через Call; Optional и ParamArray учтены
+      в скобках или через Call; Optional и ParamArray учтены.
+      «Имя (a), b» — голый вызов с двумя аргументами, а не с одним; имя,
+      объявленное в самой процедуре, затеняет процедуру и не проверяется
       (VBA: Argument not optional / Wrong number of arguments)
   E22 именованный аргумент, которого нет в сигнатуре процедуры модуля
       (VBA: Named argument not found)
-  E23 тип в «As <Тип>» не известен — ни встроенный, ни объектный, ни
-      объявленный в модуле (VBA: User-defined type not defined)
+  E23 тип в «As <Тип>» не известен — ни встроенный (TYPES), ни объектный
+      (OBJECT_TYPES), ни объявленный в модуле. Квалификатор библиотеки
+      («Excel.Worksheet», «Scripting.Dictionary») отбрасывается: тип —
+      последняя часть. Имена функций типами не считаются, поэтому «As Left»
+      — ошибка (VBA: User-defined type not defined)
 
 Предупреждения (код возврата не меняют):
   W01 табуляция вместо пробелов
   W02 хвостовые пробелы
   W03 строка длиннее MAX_LINE
-  W04 неиспользуемый параметр/локальная переменная
+  W04 неиспользуемый параметр/локальная переменная; инициализатор другой
+      константы («Const B = A * 2») считается использованием A
   W05 метка, на которую нет переходов
   W06 Private-объявление уровня модуля нигде не используется (Public/Friend
-      может использовать другой модуль проекта — не проверяется)
+      может использовать другой модуль проекта — не проверяется). Все имена
+      перечисления («Private a As Long, b As Long») проверяются по отдельности
 
 Использование:
     python3 tools/vba-lint.py [файл.bas ...]
@@ -133,6 +140,19 @@ xlcalculationautomatic xlcalculationmanual xlcalculationsemiautomatic
 TYPES = set("""
 long integer double single string boolean variant object byte currency
 decimal date collection
+""".split())
+
+# Объектные типы — отдельно от BUILTINS. Раньше E23 считал известным типом
+# всё из BUILTINS, а там имена функций и свойств: «As Left» проходило.
+# Библиотечные имена (Excel.Worksheet, Scripting.Dictionary) разбираются
+# с квалификатором, поэтому префикс в список не входит.
+OBJECT_TYPES = set("""
+worksheet worksheets workbook workbooks sheet sheets range ranges
+shape shapes chart charts name names window windows application
+font fillformat lineformat shadowformat textframe textframe2 textrange
+paragraphformat cellformat borders interior comment hyperlink
+dictionary filesystemobject textstream file folder drive
+regexp matchcollection match submatches collection
 """.split())
 
 # ---------------------------------------------------------------------------
@@ -218,11 +238,13 @@ def build_logical(raw_lines):
     return logical
 
 
-# «Static Sub» и «Public Static Sub» — тоже начало процедуры; тип результата
-# бывает массивом («As Long()»), иначе такие процедуры выпадали из разбора.
+# «Static Sub» и «Public Static Sub» — тоже начало процедуры. Закрывающая
+# скобка списка параметров ищется по балансу (match_paren), а не жадным
+# «\(.*\)»: иначе у «Function X(a As Long) As Long()» в список параметров
+# попадало «(a As Long) As Long()» и тип результата терялся.
 PROC_START = re.compile(
     r"^\s*((?:(?:public|private|friend|static)\s+)*)(sub|function|property (?:get|let|set))"
-    r"\s+([^\s(]+)(\(.*\))?\s*(as\s+\w+\s*(?:\(\s*\))?)?\s*$",
+    r"\s+([^\s(]+)",
     re.I,
 )
 PROC_END = re.compile(r"^\s*end (sub|function|property)\b", re.I)
@@ -238,11 +260,22 @@ def parse_procedures(logical):
         if cur is None:
             m = PROC_START.match(text)
             if m:
+                rest = text[m.end():]
+                sig, ret = "", rest.strip().lower()
+                stripped = rest.lstrip()
+                if stripped.startswith("("):
+                    open_idx = m.end() + len(rest) - len(stripped)
+                    close = match_paren(text, open_idx)
+                    if close < 0:
+                        sig = stripped          # незакрытую скобку поймает E04
+                    else:
+                        sig = text[open_idx:close + 1]
+                        ret = text[close + 1:].strip().lower()
                 cur = {
                     "kind": m.group(2).lower().split()[0],
                     "name": m.group(3),
-                    "sig": m.group(4) or "",
-                    "ret": (m.group(5) or "").strip().lower(),
+                    "sig": sig,
+                    "ret": ret,
                     "start": no,
                     "body": [],
                     "span": span,
@@ -293,9 +326,15 @@ def module_level(module):
             continue
         m = re.match(
             r"^(private|public|friend)\s+(?:const\s+|dim\s+|static\s+)?"
-            r"(?:withevents\s+)?(%s)" % NAME_RE, text.strip(), re.I)
+            r"(?:withevents\s+)?(.*)$", text.strip(), re.I | re.S)
         if m:
-            names[m.group(2).lower()] = (no, m.group(1).lower(), m.group(2))
+            # «Private a As Long, b As Long» объявляет и b: имена идут через
+            # запятую верхнего уровня, как в declared_in_proc.
+            for part in split_top(m.group(2)):
+                nm = re.match(r"(%s)" % NAME_RE, part)
+                if nm:
+                    names[nm.group(1).lower()] = (no, m.group(1).lower(),
+                                                  nm.group(1))
     return names, types, members
 
 
@@ -396,17 +435,23 @@ def stmt_tail(text, pos):
     return text[pos:]
 
 
-def find_calls(text, signatures):
+def find_calls(text, signatures, local=frozenset()):
     """Вызовы процедур модуля в операторе: (имя, [аргументы]).
 
     Три формы VBA: «Имя a, b» (голый вызов), «Имя(a, b)» (в выражении или
     через Call) и «Имя» без аргументов. Имя функции как переменная
     результата («Имя = …», «Имя > 0») вызовом не считается.
+
+    «Имя (a), b» в начале оператора — голый вызов, у которого первый
+    аргумент взят в скобки (VBA так делает по умолчанию), а не вызов с
+    одним аргументом: запятая после закрывающей скобки продолжает список.
+    Имя, объявленное в самой процедуре (local), затеняет процедуру модуля
+    — это законный VBA, и вызовом оно не считается.
     """
     out = []
     for m in re.finditer(r"(?<![.\w])(%s)" % NAME_RE, text):
         name = m.group(1).lower()
-        if name not in signatures:
+        if name not in signatures or name in local:
             continue
         rest = text[m.end():]
         stripped = rest.lstrip()
@@ -418,8 +463,12 @@ def find_calls(text, signatures):
             # «Имя(x) = 5» целым оператором — присваивание элементу массива,
             # а не вызов. Но «If Имя(x) = key Then» — сравнение, и вызов в нём
             # проверяется: разница только в позиции оператора.
-            if (STMT_HEAD.search(text[:m.start()])
-                    and text[close + 1:].lstrip().startswith("=")):
+            at_head = STMT_HEAD.search(text[:m.start()])
+            after = text[close + 1:].lstrip()
+            if at_head and after.startswith("="):
+                continue
+            if at_head and after.startswith(","):
+                out.append((name, split_top(stmt_tail(text, m.end()))))
                 continue
             out.append((name, split_top(text[open_idx + 1:close])))
         elif STMT_HEAD.search(text[:m.start()]) and not NOT_A_CALL.match(rest):
@@ -449,12 +498,22 @@ def usage_text(proc):
 
     «Dim x As Long: x = 1» — объявление и использование в одной строке:
     после двоеточия начинается отдельный оператор, его считаем.
+
+    Инициализатор константы — тоже использование: в «Const B = A * 2»
+    константа A используется, хотя строка и объявление. Без этого W04
+    считал A мёртвой (W06 на уровне модуля инициализаторы уже учитывал).
     """
     out = []
     for _no, text, _span in proc["body"]:
         t = mask_strings(text).lower()
         if DECL.match(t):
-            t = t.split(":", 1)[1] if ":" in t else ""
+            rest = t.split(":", 1)[1] if ":" in t else ""
+            if re.match(r"^\s*const\b", t):
+                body = re.sub(r"^\s*const\s+", "", t.split(":", 1)[0])
+                inits = [part.split("=", 1)[1] for part in split_top(body)
+                         if "=" in part]
+                rest = " ".join(inits) + " " + rest
+            t = rest
         out.append(t)
     return "\n".join(out)
 
@@ -635,8 +694,10 @@ def check_file(path):
         # именованных. Сигнатуры известны, поэтому это проверяемо статически
         # — а VBA в CI не запускается, и «Argument not optional» иначе
         # всплывает только при импорте модуля в Excel.
+        local_names = declared_in_proc(p)
         for no, text, _orig in p["body"]:
-            for name, args in find_calls(mask_strings(text), signatures):
+            for name, args in find_calls(mask_strings(text), signatures,
+                                         local_names):
                 sig = signatures[name]
                 positional, named = 0, []
                 for arg in args:
@@ -774,7 +835,7 @@ def check_file(path):
     # вырезает «As …» целиком, — а опечатка в типе это ошибка компиляции VBA
     # («User-defined type not defined»). Класс из другого модуля проекта
     # добавляется в TYPES тем же коммитом (см. докстринг).
-    known_types = TYPES | BUILTINS | mod_types
+    known_types = TYPES | OBJECT_TYPES | mod_types
     scans = [("<уровень модуля>", [(no, t) for no, t, _span in module])]
     for p in procs:
         scans.append((p["name"],
@@ -782,10 +843,15 @@ def check_file(path):
                       + [(no, t) for no, t, _span in p["body"]]))
     for label, lines in scans:
         for no, text in lines:
-            for m in re.finditer(r"\bas\s+(?:new\s+)?(%s)" % NAME_RE,
-                                 mask_strings(text), re.I):
-                if m.group(1).lower() not in known_types:
-                    err("E23", no, "%s: тип «%s» не известен" % (label, m.group(1)))
+            for m in re.finditer(
+                    r"\bas\s+(?:new\s+)?(%s)(?:\s*\.\s*(%s))?"
+                    % (NAME_RE, NAME_RE), mask_strings(text), re.I):
+                # С квалификатором («Excel.Worksheet») тип — последняя часть;
+                # имя библиотеки может быть любым, оно не объявляется здесь.
+                typ = m.group(2) or m.group(1)
+                if typ.lower() not in known_types:
+                    err("E23", no, "%s: тип «%s» не известен"
+                        % (label, m.group(0).split(None, 1)[1]))
 
     # W06 — неиспользуемые объявления уровня модуля. Только Private:
     # Public/Friend может использовать другой модуль проекта, отсюда этого
@@ -1065,6 +1131,64 @@ SELFTEST = [
      "Private Sub Дело()\n"
      "    MsgBox \"x\"\n"
      "End Sub\n", set(), {"E03"}),
+    # --- разбор вызовов, типов и объявлений (ревизия E21/E23/W04/W06) ---
+    ("E21: «Имя (a), b» — голый вызов, первый аргумент в скобках",
+     "Private Sub Прок(ByVal a As Long, ByVal b As Long)\n"
+     "End Sub\n\n"
+     "Private Sub Дело()\n"
+     "    Прок (1), 2\n"
+     "End Sub\n", set(), {"E21"}),
+    ("E21: «Имя (a)» без второго аргумента — по-прежнему ошибка",
+     "Private Sub Прок(ByVal a As Long, ByVal b As Long)\n"
+     "End Sub\n\n"
+     "Private Sub Дело()\n"
+     "    Прок (1)\n"
+     "End Sub\n", {"E21"}, set()),
+    ("E21: локаль затеняет процедуру модуля — это законный VBA",
+     "Private Function Двойник(ByVal a As Long, ByVal b As Long) As Long\n"
+     "    Двойник = a + b\n"
+     "End Function\n\n"
+     "Private Sub Дело()\n"
+     "    Dim Двойник As Variant\n"
+     "    Двойник = Array(1, 2)\n"
+     "    MsgBox Двойник(0)\n"
+     "End Sub\n", set(), {"E21"}),
+    ("E23: квалифицированный тип Excel.Worksheet известен",
+     "Private Sub Дело()\n"
+     "    Dim ws As Excel.Worksheet\n"
+     "    Set ws = ThisWorkbook.Worksheets(1)\n"
+     "    MsgBox ws.Name\n"
+     "End Sub\n", set(), {"E23"}),
+    ("E23: Scripting.Dictionary — тип из внешней библиотеки",
+     "Private Sub Дело()\n"
+     "    Dim d As Scripting.Dictionary\n"
+     "    Set d = CreateObject(\"Scripting.Dictionary\")\n"
+     "    MsgBox d.Count\n"
+     "End Sub\n", set(), {"E23"}),
+    ("E23: имя функции вместо типа — ошибка («As Left»)",
+     "Private Sub Дело()\n"
+     "    Dim x As Left\n"
+     "    MsgBox x\n"
+     "End Sub\n", {"E23"}, set()),
+    ("E08: второе имя в объявлении модуля тоже объявлено",
+     "Private a As Long, b As Long\n\n"
+     "Private Sub Дело()\n"
+     "    a = 1\n"
+     "    b = 2\n"
+     "    MsgBox a + b\n"
+     "End Sub\n", set(), {"E08", "W06"}),
+    ("W06: второе имя в объявлении модуля не используется",
+     "Private a As Long, b As Long\n\n"
+     "Private Sub Дело()\n"
+     "    a = 1\n"
+     "    MsgBox a\n"
+     "End Sub\n", {"W06"}, set()),
+    ("W04: константа, использованная другой константой, жива",
+     "Private Sub Дело()\n"
+     "    Const A As Long = 2\n"
+     "    Const B As Long = A * 3\n"
+     "    MsgBox B\n"
+     "End Sub\n", set(), {"W04"}),
 ]
 
 
@@ -1091,10 +1215,24 @@ def selftest():
     # «Static Sub» и «As Long()» обязаны попадать в разбор процедур.
     if not is_continued("x = 1 + _") or is_continued("Dim foo_"):
         bad.append("is_continued: « _» и хвост «foo_» различаются неверно")
-    for sig in ("Static Sub Дело()", "Public Static Sub Дело()",
-                "Private Function Массив() As Long()"):
-        if not PROC_START.match(sig):
+    # Недостаточно узнать сигнатуру — список параметров и тип результата
+    # обязаны лечь в разные поля: жадный «\(.*\)» съедал «As Long()».
+    for sig, want_sig, want_ret in (
+            ("Static Sub Дело()", "()", ""),
+            ("Public Static Sub Дело()", "()", ""),
+            ("Private Function Массив() As Long()", "()", "as long()"),
+            ("Private Function X(a As Long) As Long()", "(a As Long)",
+             "as long()"),
+            ("Private Function X(a As Long) As Long", "(a As Long)",
+             "as long")):
+        procs, _module = parse_procedures(
+            [(1, sig, [1]), (2, "End Function", [2])])
+        if not procs:
             bad.append("PROC_START не узнаёт сигнатуру: %s" % sig)
+        elif (procs[0]["sig"], procs[0]["ret"]) != (want_sig, want_ret):
+            bad.append("сигнатура разделена неверно: %s → %r, %r (ожидалось "
+                       "%r, %r)" % (sig, procs[0]["sig"], procs[0]["ret"],
+                                    want_sig, want_ret))
     return bad
 
 
