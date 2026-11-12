@@ -48,7 +48,7 @@ Private Const ADDR_FREQ_DI As String = "AC10"
 
 ' —игналы AI/AO: они заданы только там, где есть мультиплексоры (строки 47-48).
 Private Const ADDR_MUX_P10 As String = "P10"
-Private Const ADDR_MUX_O10 As String = "O10"
+Private Const ADDR_MUX_Q10 As String = "Q10"
 Private Const ADDR_MUX_R10 As String = "R10"
 Private Const ADDR_MUX_S10 As String = "S10"
 
@@ -575,16 +575,16 @@ Public Sub —оздать онфигуратор()
     sigDO = „итать„исло(ws, ADDR_EXI_DO)
     –аспределитьќбщиеЅарьерыDIO sigDO
 
-    ' P10/O10/R10/S10 бывают только там, где мультиплексоры есть: сигналы
+    ' P10/Q10/R10/S10 бывают только там, где мультиплексоры есть: сигналы
     ' заданы, а строк 47-48 нет Ч почти наверн€ка их забыли в листе Ђ1ї.
     sigMux = „итать„исло(ws, ADDR_MUX_P10) + _
-             „итать„исло(ws, ADDR_MUX_O10) + _
+             „итать„исло(ws, ADDR_MUX_Q10) + _
              „итать„исло(ws, ADDR_MUX_R10) + _
              „итать„исло(ws, ADDR_MUX_S10)
 
     If sigMux > 0 And muxQty = 0 Then
         gWarn = gWarn & vbCrLf & _
-            "  Х «аданы сигналы AI/AO (P10/O10/R10/S10), " & _
+            "  Х «аданы сигналы AI/AO (P10/Q10/R10/S10), " & _
             "но мультиплексоры (строки 47, 48) не добавлены."
     End If
 
