@@ -17,7 +17,13 @@
      количество должно быть числом, а не текстом;
   3. одно наименование в Service — одна ширина: при разных H макрос берёт
      первую подходящую строку, а выпадающий список в столбце C листа «1»
-     может ссылаться на другую (так было с AIO.2.xx/2: 164 и 160 мм).
+     может ссылаться на другую (так было с AIO.2.xx/2: 164 и 160 мм);
+  4. `Module1` внутри книги (`xl/vbaProject.bin`) == `Module1.bas`: Excel
+     запускает копию из книги, а не файл из репозитория, и после правки
+     `Module1.bas` книга молча отставала. vbaProject.bin читается как
+     MS-CFB, поток VBA/dir и исходники модулей — как MS-OVBA (Excel не
+     нужен); хвостовые переводы строк при сверке не считаются — их дописывает
+     сам VBE при импорте и сохранении.
 
 Ячейка-ошибка (#N/A, #REF!) в столбце D — не расхождение: макрос читает её
 как 0 и молча пропускает строку (IsError → Exit Function в ЧитатьКол).
@@ -34,12 +40,22 @@ Service» проверяется. Если ячейка окажется нев�
 Ни значение, ни наличие формулы не сверяются: и то и другое меняется
 законно — до первого прогона формула-оценка, после — число раскладки.
 
-Запуск: python3 tools/check-example.py [книга.xlsm]  (по умолчанию —
+Запуск: python3 tools/check-example.py [--sync] [книга.xlsm]  (по умолчанию —
 Example.xlsm в корне репозитория).
-Код возврата: 0 — расхождений нет, 1 — есть.
+Код возврата: 0 — расхождений нет, 1 — есть, 2 — неверные аргументы или
+--sync не смог обновить книгу.
+
+--sync сначала кладёт `Module1.bas` в `xl/vbaProject.bin` (если копия в книге
+отличается), затем гонит обычные проверки по обновлённой книге. Остальные
+части архива и метаданные его записей не меняются, листы и значения —
+тоже; описание того, что именно делается с контейнером VBA, — у `sync_book`.
 """
 
+import difflib
+import os
+import random
 import re
+import struct
 import sys
 import zipfile
 import xml.etree.ElementTree as ET
@@ -397,10 +413,701 @@ def check_width_conflicts(rows):
               % len(widths))
 
 
+# ---------------------------------------------------------------------------
+# xl/vbaProject.bin стандартной библиотекой: контейнер MS-CFB, сжатие и каталог
+# MS-OVBA. Нужны, чтобы сверить Module1 в книге с Module1.bas и (--sync) без
+# Excel положить в книгу Module1.bas.
+# ---------------------------------------------------------------------------
+
+VBA_PROJECT = "xl/vbaProject.bin"
+
+CFB_MAGIC = bytes.fromhex("d0cf11e0a1b11ae1")
+CFB_MAXREG = 0xFFFFFFFA                # выше — служебные значения FAT
+CFB_FATSECT, CFB_ENDOFCHAIN, CFB_FREESECT = 0xFFFFFFFD, 0xFFFFFFFE, 0xFFFFFFFF
+CFB_NOSTREAM = 0xFFFFFFFF
+CFB_SECTOR, CFB_MINI, CFB_CUTOFF, CFB_ENTRY = 512, 64, 4096, 128
+CFB_HEADER_FAT = 109                   # секторов FAT, помещающихся в заголовок
+
+# _VBA_PROJECT без кэша компиляции (MS-OVBA 2.3.4.1): Reserved1 = 0x61CC,
+# Version = 0xFFFF, Reserved2 = 0x00, Reserved3 = 0x0000, и всё.
+PURGED_VBA_PROJECT = bytes.fromhex("cc61ffff000000")
+SRP_STREAM = re.compile(r"^VBA/__SRP_[0-9]+$", re.I)
+
+OVBA_CHUNK = 4096
+OVBA_CANDIDATES = 128                  # сколько прошлых совпадений пробовать
+
+
+class FormatError(Exception):
+    """vbaProject.bin не по MS-CFB / MS-OVBA; текст — что именно не так."""
+
+
+def cfb_read(blob):
+    """Контейнер MS-CFB (v3 и v4) → {путь: байты} всех потоков.
+
+    Путь — имена хранилищ и потока через «/» без корневой записи:
+    «PROJECT», «VBA/dir». Порядок — обход каталога в порядке имён.
+    """
+    if len(blob) < CFB_SECTOR or blob[:8] != CFB_MAGIC:
+        raise FormatError("нет сигнатуры MS-CFB (D0 CF 11 E0 A1 B1 1A E1)")
+    minor, major, order, shift, mini_shift = struct.unpack_from(
+        "<5H", blob, 0x18)
+    if order != 0xFFFE or mini_shift != 6 \
+            or (major, shift) not in ((3, 9), (4, 12)):
+        raise FormatError("заголовок MS-CFB не поддержан: версия %d.%d, "
+                          "порядок байт %#06x, сдвиги %d/%d"
+                          % (major, minor, order, shift, mini_shift))
+    size = 1 << shift
+    n_fat, dir_start, _tx, cutoff, mf_start, n_mf, dif_start, n_dif = \
+        struct.unpack_from("<8I", blob, 0x2C)
+
+    def sector(i):
+        at = (i + 1) * size
+        if i > CFB_MAXREG or at + size > len(blob):
+            raise FormatError("сектор %d за концом файла" % i)
+        return blob[at:at + size]
+
+    def words(raw):
+        return struct.unpack("<%dI" % (len(raw) // 4), raw)
+
+    def chain(first, table):
+        out, seen, i = [], set(), first
+        while i != CFB_ENDOFCHAIN:
+            if i >= len(table) or i in seen:
+                raise FormatError("цепочка секторов с %d оборвана или "
+                                  "зациклена" % first)
+            seen.add(i)
+            out.append(i)
+            i = table[i]
+        return out
+
+    # FAT: первые 109 секторов — в заголовке, остальные — в цепочке DIFAT.
+    fat_at = [i for i in struct.unpack_from("<%dI" % CFB_HEADER_FAT, blob,
+                                            0x4C) if i != CFB_FREESECT]
+    nxt = dif_start
+    for _ in range(n_dif):
+        ids = words(sector(nxt))
+        fat_at += [i for i in ids[:-1] if i != CFB_FREESECT]
+        nxt = ids[-1]
+    if len(fat_at) != n_fat:
+        raise FormatError("в DIFAT %d секторов FAT, в заголовке — %d"
+                          % (len(fat_at), n_fat))
+    fat = [w for i in fat_at for w in words(sector(i))]
+
+    raw_dir = b"".join(sector(i) for i in chain(dir_start, fat))
+    # Запись каталога: (имя, тип, левый, правый, ребёнок, начало, размер).
+    entries = []
+    for at in range(0, len(raw_dir), CFB_ENTRY):
+        rec = raw_dir[at:at + CFB_ENTRY]
+        nlen, kind, _color, left, right, child = struct.unpack_from(
+            "<HBBIII", rec, 64)
+        start, length = struct.unpack_from("<IQ", rec, 0x74)
+        if kind and (nlen < 2 or nlen > 64 or nlen % 2):
+            raise FormatError("запись каталога %d: длина имени %d"
+                              % (len(entries), nlen))
+        entries.append((rec[:max(nlen - 2, 0)].decode("utf-16-le"), kind,
+                        left, right, child, start,
+                        length & 0xFFFFFFFF if major == 3 else length))
+    if not entries or entries[0][1] != 5:
+        raise FormatError("в каталоге нет корневой записи")
+
+    mini_fat = [w for i in (chain(mf_start, fat) if n_mf else [])
+                for w in words(sector(i))]
+    _name, _kind, _l, _r, root_child, root_start, root_len = entries[0]
+    mini = (b"".join(sector(i) for i in chain(root_start, fat))[:root_len]
+            if root_len else b"")
+
+    def body(start, length):
+        if not length:
+            return b""
+        if length < cutoff:
+            data = b"".join(mini[i * CFB_MINI:(i + 1) * CFB_MINI]
+                            for i in chain(start, mini_fat))
+        else:
+            data = b"".join(sector(i) for i in chain(start, fat))
+        if len(data) < length:
+            raise FormatError("поток короче заявленных %d байт" % length)
+        return data[:length]
+
+    out, seen = {}, {0}
+
+    def walk(first, prefix):
+        # Братья хранилища — двоичное дерево: левое, узел, правое.
+        stack, node = [], first
+        while stack or node != CFB_NOSTREAM:
+            while node != CFB_NOSTREAM:
+                if node >= len(entries) or node in seen:
+                    raise FormatError("запись каталога %d повторяется или "
+                                      "не существует" % node)
+                seen.add(node)
+                stack.append(node)
+                node = entries[node][2]
+            node = stack.pop()
+            name, kind, _l, right, child, start, length = entries[node]
+            if kind == 1:
+                walk(child, prefix + name + "/")
+            elif kind == 2:
+                out[prefix + name] = body(start, length)
+            else:
+                raise FormatError("запись каталога %d («%s»): тип %d"
+                                  % (node, name, kind))
+            node = right
+
+    walk(root_child, "")
+    return out
+
+
+def cfb_name_key(name):
+    """Порядок записей-братьев (MS-CFB 2.6.4): сначала длина имени, затем
+    коды UTF-16 имени в верхнем регистре."""
+    up = "".join(c.upper() if len(c.upper()) == 1 else c for c in name)
+    raw = up.encode("utf-16-le")
+    return len(raw) // 2, struct.unpack("<%dH" % (len(raw) // 2), raw)
+
+
+def cfb_write(streams):
+    """{путь: байты} → контейнер MS-CFB v3 (сектор 512 Б, мини-сектор 64 Б,
+    порог мини-потока 4096 Б).
+
+    Раскладка: каталог, мини-FAT, мини-поток, большие потоки, в конце FAT.
+    Братья каждого хранилища — сбалансированное красно-чёрное дерево: нижний
+    ярус красный, остальные чёрные (так цвета верны при любом числе записей),
+    имена упорядочены по cfb_name_key. Свободные записи в хвосте каталога —
+    нули и NOSTREAM у ссылок, как требует MS-CFB.
+    """
+    root = {"name": "Root Entry", "kind": 5, "kids": {}, "color": 1}
+    for path, data in streams.items():
+        *folders, leaf = path.split("/")
+        node = root
+        for name in folders + [leaf]:
+            if len(name) > 31:
+                raise FormatError("имя «%s» длиннее 31 символа" % name)
+        for folder in folders:
+            node = node["kids"].setdefault(
+                cfb_name_key(folder),
+                {"name": folder, "kind": 1, "kids": {}})
+        if cfb_name_key(leaf) in node["kids"]:
+            raise FormatError("поток %s записан дважды" % path)
+        node["kids"][cfb_name_key(leaf)] = {
+            "name": leaf, "kind": 2, "data": bytes(data)}
+
+    nodes, queue = [root], [root]
+    for storage in queue:              # очередь растёт по ходу обхода
+        storage["sorted"] = [storage["kids"][k]
+                             for k in sorted(storage["kids"])]
+        for kid in storage["sorted"]:
+            kid["id"] = len(nodes)
+            nodes.append(kid)
+            if kid["kind"] == 1:
+                queue.append(kid)
+    root["id"] = 0
+
+    def link(kids):
+        """Дерево братьев по отсортированному списку → id его корня."""
+        last = len(kids).bit_length() - 1          # нижний ярус
+
+        def build(lo, hi, level):
+            if lo >= hi:
+                return CFB_NOSTREAM
+            mid = (lo + hi) // 2
+            kid = kids[mid]
+            kid["left"] = build(lo, mid, level + 1)
+            kid["right"] = build(mid + 1, hi, level + 1)
+            kid["color"] = 0 if last > 0 and level == last else 1
+            return kid["id"]
+        return build(0, len(kids), 0)
+
+    for node in nodes:
+        node["child"] = link(node["sorted"]) if node["kind"] != 2 \
+            else CFB_NOSTREAM
+
+    leaves = [n for n in nodes if n["kind"] == 2]
+    small = [n for n in leaves if 0 < len(n["data"]) < CFB_CUTOFF]
+    large = [n for n in leaves if len(n["data"]) >= CFB_CUTOFF]
+    mini, mini_fat = bytearray(), []
+    for node in small:
+        count = -(-len(node["data"]) // CFB_MINI)
+        node["start"] = len(mini_fat)
+        mini_fat += [len(mini_fat) + k + 1 for k in range(count - 1)]
+        mini_fat.append(CFB_ENDOFCHAIN)
+        mini += node["data"].ljust(count * CFB_MINI, b"\0")
+
+    n_dir = -(-len(nodes) // (CFB_SECTOR // CFB_ENTRY))
+    n_mf = -(-len(mini_fat) * 4 // CFB_SECTOR)
+    n_ms = -(-len(mini) // CFB_SECTOR)
+    at = 0
+    dir_start, at = at, at + n_dir
+    mf_start, at = (at if n_mf else CFB_ENDOFCHAIN), at + n_mf
+    ms_start, at = (at if n_ms else CFB_ENDOFCHAIN), at + n_ms
+    for node in large:
+        node["start"], at = at, at + -(-len(node["data"]) // CFB_SECTOR)
+    n_fat = -(-at // (CFB_SECTOR // 4 - 1))        # FAT описывает и себя
+    if n_fat > CFB_HEADER_FAT:
+        raise FormatError("vbaProject.bin больше 7 МБ — DIFAT не поддержан")
+
+    fat = [CFB_FREESECT] * (n_fat * CFB_SECTOR // 4)
+
+    def extend(first, count):
+        for k in range(count):
+            fat[first + k] = first + k + 1 if k < count - 1 \
+                else CFB_ENDOFCHAIN
+    extend(dir_start, n_dir)
+    if n_mf:
+        extend(mf_start, n_mf)
+    if n_ms:
+        extend(ms_start, n_ms)
+    for node in large:
+        extend(node["start"], -(-len(node["data"]) // CFB_SECTOR))
+    for k in range(n_fat):
+        fat[at + k] = CFB_FATSECT
+
+    def entry(node):
+        raw = node["name"].encode("utf-16-le")
+        if node["kind"] == 5:
+            start, length = ms_start, len(mini)
+        elif node["kind"] == 1:
+            start, length = 0, 0
+        else:
+            length = len(node["data"])
+            start = node.get("start", CFB_ENDOFCHAIN) if length \
+                else CFB_ENDOFCHAIN
+        return (raw.ljust(64, b"\0")
+                + struct.pack("<HBBIII", len(raw) + 2, node["kind"],
+                              node["color"],
+                              node.get("left", CFB_NOSTREAM),
+                              node.get("right", CFB_NOSTREAM), node["child"])
+                + bytes(16)            # CLSID
+                + struct.pack("<IQQIQ", 0, 0, 0, start, length))
+    free = (bytes(64) + struct.pack("<HBBIII", 0, 0, 0, CFB_NOSTREAM,
+                                    CFB_NOSTREAM, CFB_NOSTREAM) + bytes(48))
+    table = b"".join(entry(n) for n in nodes) \
+        + free * (n_dir * CFB_SECTOR // CFB_ENTRY - len(nodes))
+
+    header = bytearray(CFB_SECTOR)
+    header[:8] = CFB_MAGIC
+    struct.pack_into("<5H", header, 0x18, 0x3E, 3, 0xFFFE, 9, 6)
+    struct.pack_into("<9I", header, 0x28, 0, n_fat, dir_start, 0, CFB_CUTOFF,
+                     mf_start, n_mf, CFB_ENDOFCHAIN, 0)
+    struct.pack_into("<%dI" % CFB_HEADER_FAT, header, 0x4C,
+                     *([at + k for k in range(n_fat)]
+                       + [CFB_FREESECT] * (CFB_HEADER_FAT - n_fat)))
+
+    body = bytearray(table)
+    body += struct.pack("<%dI" % (n_mf * CFB_SECTOR // 4), *(
+        mini_fat + [CFB_FREESECT] * (n_mf * CFB_SECTOR // 4 - len(mini_fat))))
+    body += mini.ljust(n_ms * CFB_SECTOR, b"\0")
+    for node in large:
+        body += node["data"].ljust(-(-len(node["data"]) // CFB_SECTOR)
+                                   * CFB_SECTOR, b"\0")
+    body += struct.pack("<%dI" % len(fat), *fat)
+    return bytes(header) + bytes(body)
+
+
+def ovba_decompress(data):
+    """Сжатый контейнер MS-OVBA (2.4.1) → исходные байты."""
+    if not data or data[0] != 1:
+        raise FormatError("сжатый исходник: нет сигнатуры 0x01")
+    out, pos = bytearray(), 1
+    while pos < len(data):
+        if pos + 2 > len(data):
+            raise FormatError("сжатый исходник оборван в заголовке куска")
+        head = struct.unpack_from("<H", data, pos)[0]
+        end = pos + (head & 0x0FFF) + 3
+        if (head >> 12) & 7 != 3 or end > len(data):
+            raise FormatError("сжатый исходник: битый кусок на смещении %d"
+                              % pos)
+        pos += 2
+        if not head & 0x8000:                      # сырой кусок, 4096 Б
+            if end - pos != OVBA_CHUNK:
+                raise FormatError("сырой кусок не 4096 байт")
+            out += data[pos:end]
+            pos = end
+            continue
+        first = len(out)
+        while pos < end:
+            flags = data[pos]
+            pos += 1
+            for bit in range(8):
+                if pos >= end:
+                    break
+                if not flags >> bit & 1:           # литерал
+                    out.append(data[pos])
+                    pos += 1
+                    continue
+                if pos + 2 > end:
+                    raise FormatError("сжатый исходник: оборван токен")
+                token = struct.unpack_from("<H", data, pos)[0]
+                pos += 2
+                done = len(out) - first
+                bits = max((done - 1).bit_length(), 4)
+                length = (token & (0xFFFF >> bits)) + 3
+                offset = (token >> (16 - bits)) + 1
+                if offset > done:
+                    raise FormatError("сжатый исходник: ссылка за началом "
+                                      "куска")
+                for _ in range(length):            # возможен нахлёст
+                    out.append(out[-offset])
+        if len(out) - first > OVBA_CHUNK:
+            raise FormatError("кусок распаковался больше чем в 4096 байт")
+    return bytes(out)
+
+
+def ovba_pack_chunk(chunk):
+    """Токены одного куска (до 4096 байт): флаг-байт и до 8 токенов за ним.
+
+    Токен — литерал (1 байт) или ссылка на уже выданное в этом куске (2
+    байта): число бит под смещение растёт с позицией (MS-OVBA 2.4.1).
+    Берётся самое длинное из ближайших совпадений.
+    """
+    out, seen, pos, size = bytearray(), {}, 0, len(chunk)
+    while pos < size:
+        flags, tokens = 0, bytearray()
+        for bit in range(8):
+            if pos >= size:
+                break
+            bits = max((pos - 1).bit_length(), 4)
+            limit = min((0xFFFF >> bits) + 3, size - pos)
+            best, offset = 0, 0
+            if pos + 3 <= size:
+                for cand in seen.get(chunk[pos:pos + 3], ())[
+                        :-OVBA_CANDIDATES - 1:-1]:
+                    length = 3
+                    while length < limit \
+                            and chunk[cand + length] == chunk[pos + length]:
+                        length += 1
+                    if length > best:
+                        best, offset = length, pos - cand
+                        if length == limit:
+                            break
+            if best >= 3:
+                flags |= 1 << bit
+                tokens += struct.pack("<H", ((offset - 1) << (16 - bits))
+                                      | (best - 3))
+                step = best
+            else:
+                tokens.append(chunk[pos])
+                step = 1
+            for k in range(pos, min(pos + step, size - 2)):
+                seen.setdefault(chunk[k:k + 3], []).append(k)
+            pos += step
+        out.append(flags)
+        out += tokens
+    return bytes(out)
+
+
+def ovba_compress(data):
+    """Байты → сжатый контейнер MS-OVBA (2.4.1).
+
+    Кусок, чьи токены не влезают в 4096 байт, пишется сырым: ровно 4096
+    байт, добитых нулями. У текста модуля такого не бывает (он сжимается),
+    но распаковка после сжатия всё равно сверяется — см. sync_book.
+    """
+    out = bytearray(b"\x01")
+    for at in range(0, len(data), OVBA_CHUNK):
+        chunk = data[at:at + OVBA_CHUNK]
+        packed = ovba_pack_chunk(chunk)
+        if len(packed) > OVBA_CHUNK:
+            out += struct.pack("<H", 0x3FFF) + chunk.ljust(OVBA_CHUNK, b"\0")
+        else:
+            out += struct.pack("<H", 0xB000 | (len(packed) - 1)) + packed
+    return bytes(out)
+
+
+def ovba_records(raw):
+    """Записи потока dir (MS-OVBA 2.3.4.2): [(Id, смещение данных, длина)].
+
+    Запись — Id (2 Б), Size (4 Б), затем Size байт. Исключение одно —
+    PROJECTVERSION (Id 0x0009): после Size = 4 идут ещё 6 байт версии.
+    """
+    out, pos = [], 0
+    while pos < len(raw):
+        rid, size = struct.unpack_from("<HI", raw, pos)
+        size = 6 if rid == 0x0009 else size
+        if pos + 6 + size > len(raw):
+            raise FormatError("VBA/dir: запись %#06x оборвана на смещении %d"
+                              % (rid, pos))
+        out.append((rid, pos + 6, size))
+        pos += 6 + size
+    return out
+
+
+def ovba_modules(raw):
+    """Модули проекта из VBA/dir: [{name, stream, offset, offset_at}].
+
+    offset — где в потоке модуля начинается сжатый исходник (MODULEOFFSET,
+    до него — кэш компиляции), offset_at — где это число лежит в raw.
+    """
+    codepage, modules, cur = "cp1251", [], None
+    for rid, at, size in ovba_records(raw):
+        data = raw[at:at + size]
+        if rid == 0x0003 and size == 2:            # PROJECTCODEPAGE
+            codepage = "cp%d" % struct.unpack("<H", data)[0]
+        elif rid == 0x0019:                        # MODULENAME
+            cur = {"name": data.decode(codepage), "stream": None,
+                   "offset": None, "offset_at": None}
+            modules.append(cur)
+        elif cur is None:
+            continue
+        elif rid == 0x0047:                        # MODULENAMEUNICODE
+            cur["name"] = data.decode("utf-16-le")
+        elif rid == 0x001A:                        # MODULESTREAMNAME
+            if cur["stream"] is None:
+                cur["stream"] = data.decode(codepage)
+        elif rid == 0x0032:                        # …UNICODE
+            cur["stream"] = data.decode("utf-16-le")
+        elif rid == 0x0031 and size == 4:          # MODULEOFFSET
+            cur["offset"] = struct.unpack("<I", data)[0]
+            cur["offset_at"] = at
+    for m in modules:
+        if m["stream"] is None or m["offset"] is None:
+            raise FormatError("VBA/dir: у модуля %s нет потока или смещения"
+                              % m["name"])
+    return modules
+
+
+class Project:
+    """Разобранный vbaProject.bin: потоки контейнера и модули из VBA/dir."""
+
+    def __init__(self, blob):
+        try:
+            self.streams = cfb_read(blob)
+            if "VBA/dir" not in self.streams:
+                raise FormatError("в контейнере нет потока VBA/dir")
+            self.dir = ovba_decompress(self.streams["VBA/dir"])
+            self.modules = ovba_modules(self.dir)
+        except (struct.error, IndexError, ValueError, RecursionError) as exc:
+            raise FormatError("vbaProject.bin повреждён: %s: %s"
+                              % (type(exc).__name__, exc))
+
+    def find(self, name):
+        return next((m for m in self.modules
+                     if m["name"].upper() == name.upper()), None)
+
+    def stream_path(self, module):
+        want = ("VBA/" + module["stream"]).upper()
+        for path in self.streams:
+            if path.upper() == want:
+                return path
+        raise FormatError("нет потока VBA/%s модуля %s"
+                          % (module["stream"], module["name"]))
+
+    def payload(self, module):
+        """Сжатый исходник модуля — поток без кэша компиляции в начале."""
+        blob = self.streams[self.stream_path(module)]
+        if module["offset"] > len(blob):
+            raise FormatError("MODULEOFFSET модуля %s дальше конца потока"
+                              % module["name"])
+        return blob[module["offset"]:]
+
+    def source(self, module):
+        try:
+            return ovba_decompress(self.payload(module))
+        except (struct.error, IndexError, ValueError) as exc:
+            raise FormatError("исходник модуля %s: %s" % (module["name"], exc))
+
+
+def sync_book(book_path):
+    """Module1.bas → xl/vbaProject.bin книги. True — книга изменена.
+
+    Книга меняется, только если Module1 в ней расходится с Module1.bas
+    (хвостовые переводы строк не в счёт). Что делается тогда — и почему:
+      * Module1 заново сжимается из байтов Module1.bas как есть (MS-OVBA
+        2.4.1), распаковка обратно обязана вернуть те же байты;
+      * кэш компиляции убирается целиком: начало потоков модулей (в VBA/dir
+        MODULEOFFSET = 0, остаётся один сжатый исходник), потоки __SRP_n и
+        хвост _VBA_PROJECT (остаётся заголовок с Version = 0xFFFF — «кэша
+        нет», MS-OVBA 2.3.4.1). Кэш собран Excel из прежнего текста; будь он
+        оставлен, рядом с новым исходником лежал бы код старого. Excel
+        соберёт кэш заново при открытии книги;
+      * остальные модули (листы, ЭтаКнига, Module2), PROJECT и PROJECTwm
+        переносятся байт в байт — сжатые исходники ровно те, что записал
+        Excel;
+      * контейнер пишется заново (MS-CFB v3), прочие части архива и
+        метаданные его записей (метод, версии, атрибуты, время) не меняются.
+    Запись атомарная: сначала соседний временный файл, затем замена.
+    """
+    want = BAS.read_bytes()
+    name = bas_module_name()
+    with zipfile.ZipFile(str(book_path)) as zf:
+        if VBA_PROJECT not in zf.namelist():
+            raise FormatError("в книге нет %s — макросов нет" % VBA_PROJECT)
+        old_blob = zf.read(VBA_PROJECT)
+        old = Project(old_blob)
+    module = old.find(name)
+    if module is None:
+        raise FormatError("в книге нет модуля %s: один раз импортируйте "
+                          "%s в VBE (File → Import File), дальше --sync "
+                          "обновляет его сам" % (name, BAS.name))
+    have = old.source(module)
+    if have.rstrip(b"\r\n") == want.rstrip(b"\r\n"):
+        print("sync: %s в книге уже совпадает с %s — книга не тронута"
+              % (name, BAS.name))
+        return False
+
+    raw_dir = bytearray(old.dir)
+    for m in old.modules:
+        struct.pack_into("<I", raw_dir, m["offset_at"], 0)
+    new = {path: blob for path, blob in old.streams.items()
+           if not SRP_STREAM.match(path)}
+    new["VBA/dir"] = ovba_compress(bytes(raw_dir))
+    new["VBA/_VBA_PROJECT"] = PURGED_VBA_PROJECT
+    for m in old.modules:
+        if m is module:
+            new[old.stream_path(m)] = ovba_compress(want)
+        else:
+            old.source(m)                  # сжатый исходник цел, иначе ошибка
+            new[old.stream_path(m)] = old.payload(m)
+    blob = cfb_write(new)
+
+    # Сверка до записи: новый контейнер читается, Module1 — точно .bas,
+    # остальные модули и прочие потоки — те же, что были.
+    check_new = Project(blob)
+    if check_new.source(check_new.find(name)) != want:
+        raise FormatError("Module1.bas после сжатия и распаковки изменился")
+    for m in old.modules:
+        if m is not module and check_new.source(check_new.find(m["name"])) \
+                != old.source(m):
+            raise FormatError("модуль %s изменился при пересборке" % m["name"])
+    for path, blob_old in old.streams.items():
+        if path in ("PROJECT", "PROJECTwm") \
+                and check_new.streams.get(path) != blob_old:
+            raise FormatError("поток %s изменился при пересборке" % path)
+
+    tmp = book_path.with_name(book_path.name + ".tmp")
+    try:
+        with zipfile.ZipFile(str(book_path)) as src, \
+                zipfile.ZipFile(str(tmp), "w") as dst:
+            dst.comment = src.comment
+            for info in src.infolist():
+                copy = zipfile.ZipInfo(info.filename, info.date_time)
+                for attr in ("compress_type", "create_system",
+                             "create_version", "extract_version",
+                             "external_attr", "internal_attr", "comment"):
+                    setattr(copy, attr, getattr(info, attr))
+                dst.writestr(copy, blob if info.filename == VBA_PROJECT
+                             else src.read(info), compresslevel=9)
+        os.replace(str(tmp), str(book_path))
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+    lines = have.rstrip(b"\r\n").count(b"\r\n") + 1
+    print("sync: %s в книге (%d строк) заменён на %s (%d строк)"
+          % (name, lines, BAS.name, want.rstrip(b"\r\n").count(b"\r\n") + 1))
+    print("sync: vbaProject.bin %d → %d байт, кэш компиляции сброшен — "
+          "Excel соберёт его при открытии книги" % (len(old_blob), len(blob)))
+    return True
+
+
+def codec_selftest():
+    """MS-CFB и MS-OVBA: запись → чтение без потерь. Список расхождений."""
+    bad = []
+    rnd = random.Random(20260101)
+    noise = bytes(rnd.randrange(256) for _ in range(OVBA_CHUNK + 900))
+    code = ("Private Sub Дело(ByVal x As Long)\r\n    MsgBox \"x\"\r\n"
+            "End Sub\r\n" * 70).encode("cp1251")
+    for title, data in (("пусто", b""), ("один байт", b"a"),
+                        ("повтор на кусок", b"a" * OVBA_CHUNK),
+                        ("повтор на кусок и байт", b"a" * (OVBA_CHUNK + 1)),
+                        ("шум: сырой кусок и хвост", noise),
+                        ("текст в несколько кусков", code)):
+        try:
+            if ovba_decompress(ovba_compress(data)) != data:
+                bad.append("MS-OVBA: %s — после сжатия и распаковки иначе"
+                           % title)
+        except FormatError as exc:
+            bad.append("MS-OVBA: %s — %s" % (title, exc))
+    streams = {"Первый": b"x" * 10, "Пустой": b"",
+               "VBA/мини": noise[:CFB_CUTOFF - 1],
+               "VBA/граница": noise[:CFB_CUTOFF],
+               "VBA/большой": noise * 40, "VBA/Вложенный/ещё": b"yz" * 99}
+    for k in range(40):                # много братьев — глубокое дерево
+        streams["S%02d" % k] = bytes([k]) * (k * 37)
+    try:
+        if cfb_read(cfb_write(streams)) != streams:
+            bad.append("MS-CFB: прочитано не то, что записано")
+    except FormatError as exc:
+        bad.append("MS-CFB: %s" % exc)
+    return bad
+
+
+def bas_module_name():
+    """VB_Name из Module1.bas (если атрибута нет — Module1)."""
+    m = re.search(r'(?m)^Attribute VB_Name = "([^"]+)"', bas_text())
+    return m.group(1) if m else "Module1"
+
+
+def source_diff(have, want, limit=10):
+    """(число изменённых строк, первые строки unified diff): книга → .bas."""
+    def lines(raw):
+        return raw.rstrip(b"\r\n").decode("cp1251", "replace").split("\r\n")
+    diff = list(difflib.unified_diff(lines(have), lines(want), "книга",
+                                     BAS.name, n=0, lineterm=""))
+    changed = sum(1 for d in diff
+                  if d[:1] in "+-" and d[:3] not in ("+++", "---"))
+    return changed, diff[:limit]
+
+
+def check_vba_project(book):
+    """Module1 в книге (xl/vbaProject.bin) == Module1.bas."""
+    try:
+        blob = book.zip.read(VBA_PROJECT)
+    except KeyError:
+        check(False, "в книге есть %s" % VBA_PROJECT,
+              "макросов в книге нет — Module1 сверять не с чем")
+        return
+    try:
+        project = Project(blob)
+        sources = {m["name"]: project.source(m) for m in project.modules}
+    except FormatError as exc:
+        check(False, "%s читается как MS-CFB и MS-OVBA" % VBA_PROJECT,
+              str(exc))
+        return
+    check(True, "%s читается как MS-CFB и MS-OVBA: модулей %d (%s)"
+          % (VBA_PROJECT, len(project.modules),
+             ", ".join(m["name"] for m in project.modules)))
+    cached = len(project.streams.get("VBA/_VBA_PROJECT", b"")) \
+        > len(PURGED_VBA_PROJECT)
+    print("     " + ("кэш компиляции Excel есть" if cached else
+                     "кэша компиляции нет — Excel соберёт его при открытии "
+                     "книги"))
+    name = bas_module_name()
+    module = project.find(name)
+    if module is None:
+        check(False, "в книге есть модуль %s" % name,
+              "%s сверять не с чем: --sync не поможет, пока модуль не "
+              "импортирован в VBE (File → Import File)" % BAS.name)
+        return
+    have, want = sources[module["name"]], BAS.read_bytes()
+    same = have.rstrip(b"\r\n") == want.rstrip(b"\r\n")
+    changed, diff = source_diff(have, want)
+    lines = want.rstrip(b"\r\n").count(b"\r\n") + 1
+    check(same, "%s в книге == %s (%d строк)"
+          % (module["name"], BAS.name, lines),
+          "строк расходится: %d; книга → %s:\n         %s\n       "
+          "положить %s в книгу: python3 tools/check-example.py --sync"
+          % (changed, BAS.name, "\n         ".join(diff), BAS.name))
+
+
 def main(argv):
-    book_path = Path(argv[1]) if len(argv) > 1 else BOOK
+    paths = [a for a in argv[1:] if a != "--sync"]
+    if len(paths) > 1 or any(a.startswith("-") for a in paths):
+        print("использование: check-example.py [--sync] [книга.xlsm]")
+        return 2
+    book_path = Path(paths[0]) if paths else BOOK
     print("== check-example: %s ==" % book_path.name)
+    if "--sync" in argv[1:]:
+        try:
+            sync_book(book_path)
+        except (FormatError, OSError, zipfile.BadZipFile) as exc:
+            print("FAIL sync: %s" % exc)
+            return 2
     book = Book(book_path)
+
+    print("-- vbaProject.bin: Module1 в книге ↔ Module1.bas")
+    bad = codec_selftest()
+    check(not bad, "самопроверка чтения и записи MS-CFB / MS-OVBA",
+          "; ".join(bad))
+    check_vba_project(book)
     missing = [s for s in (SHEET_DATA, SHEET_SERVICE) if s not in book.paths]
     check(not missing, "листы «%s» и «%s» есть" % (SHEET_DATA, SHEET_SERVICE),
           "нет: %s" % ", ".join(missing))
@@ -453,7 +1160,7 @@ def main(argv):
     if FAILS:
         print("FAIL check-example")
         return 1
-    print("check-example: пример сходится с README и Service")
+    print("check-example: пример сходится с Module1.bas, README и Service")
     return 0
 
 

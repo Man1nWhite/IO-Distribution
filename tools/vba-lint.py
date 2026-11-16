@@ -543,6 +543,8 @@ def check_file(path):
         err("E02", 0, "нет переводов строк")
     if re.search(rb"(?<!\r)\n", raw):
         err("E02", 0, "встречаются LF без CR (нужен единый CRLF)")
+    if re.search(rb"\r(?!\n)", raw):
+        err("E02", 0, "встречаются CR без LF (нужен единый CRLF)")
     if raw and not raw.endswith(b"\r\n"):
         err("E02", 0, "файл не заканчивается CRLF")
 
@@ -1189,6 +1191,10 @@ SELFTEST = [
      "    Const B As Long = A * 3\n"
      "    MsgBox B\n"
      "End Sub\n", set(), {"W04"}),
+    ("E02: одиночный CR без LF",
+     "Private Sub Дело()\n\r\n"
+     "    MsgBox \"x\"\n"
+     "End Sub\n", {"E02"}, set()),
 ]
 
 
