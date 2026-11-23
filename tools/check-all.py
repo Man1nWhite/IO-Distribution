@@ -32,7 +32,7 @@ STEPS = [
     ("tools/parse-spec.py", "parse-spec: разбор чисел из текста"),
     ("tools/plan-spec.py", "plan-spec: укладчик реек"),
     ("tools/check-readme-map.py", "check-readme-map: карта процедур в README"),
-    ("tools/check-example.py", "check-example: Example.xlsm против README и Service"),
+    ("tools/check-example.py", "check-example: Example.xlsm против Module1.bas, README и Service"),
     ("tools/check-sync.py", "check-sync: зеркала, константы и обещания README"),
 ]
 

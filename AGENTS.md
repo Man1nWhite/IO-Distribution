@@ -25,9 +25,14 @@
   (E01/E02). UTF-8-копию файла рядом не создавать — это молчаливое
   дублирование, которое обязательно разойдётся с оригиналом.
 * `Example.xlsm` — бинарник, не открывать и не править вслепую: его
-  значения и лист Service сверяет `tools/check-example.py`.
+  значения, лист Service и `Module1` внутри (`vbaProject.bin`) сверяет
+  `tools/check-example.py`. Книга правится в Excel; единственное исключение —
+  код: `python3 tools/check-example.py --sync` кладёт в книгу `Module1.bas`
+  без Excel (листы и значения не меняются, кэш компиляции сбрасывается).
 * Правило зеркал: меняешь `Module1.bas` — тем же коммитом обнови
-  `tools/*-spec.py` и `README.md`; иначе `tools/check-sync.py` упадёт.
+  `tools/*-spec.py` и `README.md`; иначе `tools/check-sync.py` упадёт. И
+  книгу: `python3 tools/check-example.py --sync`, иначе упадёт
+  `tools/check-example.py` (`Module1` в `Example.xlsm` отстанет).
 
 ## Перед push
 
@@ -48,4 +53,4 @@
 | Константы: `PLAN_*`, `MAX_*`, `defRows` | `Module1.bas` + зеркала + README — сверит `check-sync.py` |
 | Новый инструмент в `tools/` | сам инструмент + `STEPS` в `tools/check-all.py` + шаг CI + раздел «Проверки» README + вывод в UTF-8 последними строками |
 | CI, actions, хуки | `.github/workflows/vba-lint.yml`, `.githooks/pre-commit` |
-| Пример книги | `Example.xlsm` правится в Excel + «Значения примера» в README (сверит `check-example.py`) |
+| Пример книги | `Example.xlsm` правится в Excel + «Значения примера» в README (сверит `check-example.py`); код `Module1` в книге обновляет `python3 tools/check-example.py --sync` |
